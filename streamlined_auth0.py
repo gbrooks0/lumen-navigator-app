@@ -20,11 +20,20 @@ class StreamlitAuth0:
         self.domain = self._get_config('AUTH0_DOMAIN')
         self.client_id = self._get_config('AUTH0_CLIENT_ID')
         self.client_secret = self._get_config('AUTH0_CLIENT_SECRET')
-        self.redirect_uri = self._get_config('AUTH0_REDIRECT_URI', 'http://localhost:8501')
-        
+        self.redirect_uri = self._get_config('AUTH0_REDIRECT_URI', self._get_default_redirect_uri())
+
         if not all([self.domain, self.client_id, self.client_secret]):
             st.error("❌ Auth0 configuration missing. Please check your secrets.")
             st.stop()
+
+    def _get_default_redirect_uri(self) -> str:
+        """Auto-detect redirect URI based on environment"""
+        # Check if running on Streamlit Cloud
+        if 'streamlit.app' in os.getenv('STREAMLIT_SERVER_HEADLESS', ''):
+            return 'https://lumen-navigator-app.streamlit.app'
+        # Default to localhost for development
+        return 'http://localhost:8501'
+
     
     def _get_config(self, key: str, default: str = None) -> str:
         """Get configuration from environment or Streamlit secrets"""
