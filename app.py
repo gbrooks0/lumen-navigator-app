@@ -70,21 +70,35 @@ def setup_sqlite():
 def initialize_rag_system():
     """Initialize RAG system if available"""
     if not RAG_SYSTEM_AVAILABLE:
+        st.error("RAG_SYSTEM_AVAILABLE is False")
         return None
         
     try:
-        if not (os.path.exists("faiss_index") or os.path.exists("indexes")):
-            st.warning("Vector database not found - some features may be limited") 
-            return None
-
-        rag_system = create_rag_system()
-        return rag_system
+        # Debug: Check what directories exist
+        faiss_exists = os.path.exists("faiss_index")
+        indexes_exists = os.path.exists("indexes")
         
+        st.write(f"Debug: faiss_index exists: {faiss_exists}")
+        st.write(f"Debug: indexes exists: {indexes_exists}")
+        
+        if not faiss_exists and not indexes_exists:
+            st.warning("Vector database not found - some features may be limited")
+            return None
+        
+        # Debug: Try to create the system
+        st.write("Debug: Attempting to create RAG system...")
         rag_system = create_rag_system()
+        
+        if rag_system:
+            st.success("Debug: RAG system created successfully")
+        else:
+            st.error("Debug: create_rag_system() returned None")
+            
         return rag_system
         
     except Exception as e:
-        st.error(f"❌ RAG System Error: {e}")
+        st.error(f"RAG System Error: {e}")
+        st.write(f"Debug: Full error details: {type(e).__name__}: {str(e)}")
         return None
 
 # Enhanced CSS Styles matching website design
