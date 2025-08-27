@@ -66,3 +66,6 @@ Flask-CORS>=4.0.0
 PyJWT>=2.8.0
 cryptography>=41.0.7
 gunicorn>=21.2.0
+plotly
+auth0-python>=4.0.0
+sqlite3 # If you use SQLite
