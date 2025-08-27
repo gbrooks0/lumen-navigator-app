@@ -74,18 +74,35 @@ def initialize_rag_system():
         return None
         
     try:
-        # Debug: Check what directories exist
+        # Check what directories exist
         faiss_exists = os.path.exists("faiss_index")
         indexes_exists = os.path.exists("indexes")
         
         st.write(f"Debug: faiss_index exists: {faiss_exists}")
         st.write(f"Debug: indexes exists: {indexes_exists}")
         
-        if not faiss_exists and not indexes_exists:
-            st.warning("Vector database not found - some features may be limited")
+        # Check for actual vector database files in your directory structure
+        has_vector_db = False
+        if indexes_exists:
+            # Check for vector files in your actual structure
+            google_index_exists = os.path.exists("indexes/google_index")
+            openai_index_exists = os.path.exists("indexes/openai_index")
+            
+            st.write(f"Debug: indexes/google_index exists: {google_index_exists}")
+            st.write(f"Debug: indexes/openai_index exists: {openai_index_exists}")
+            
+            has_vector_db = google_index_exists or openai_index_exists
+        elif faiss_exists:
+            # Check for files in faiss_index if it exists
+            faiss_files = os.listdir("faiss_index") if faiss_exists else []
+            has_vector_db = any(f.endswith(('.faiss', '.pkl')) for f in faiss_files)
+            st.write(f"Debug: faiss_index files: {faiss_files}")
+        
+        if not has_vector_db:
+            st.warning("Vector database files not found - some features may be limited")
             return None
         
-        # Debug: Try to create the system
+        # Try to create the system
         st.write("Debug: Attempting to create RAG system...")
         rag_system = create_rag_system()
         
