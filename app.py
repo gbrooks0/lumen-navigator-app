@@ -73,9 +73,12 @@ def initialize_rag_system():
         return None
         
     try:
-        if not os.path.exists("faiss_index") and not os.path.exists("indexes"):
-            st.warning("⚠️ Vector database not found - some features may be limited")
+        if not (os.path.exists("faiss_index") or os.path.exists("indexes")):
+            st.warning("Vector database not found - some features may be limited") 
             return None
+
+        rag_system = create_rag_system()
+        return rag_system
         
         rag_system = create_rag_system()
         return rag_system
