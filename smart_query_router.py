@@ -658,29 +658,101 @@ class SmartRouter:
             logger.error(f"Failed to load any default embedding models: {e}")
     
     def load_vector_stores(self):
-        """Load FAISS vector stores with enhanced error handling."""
+        """Load FAISS vector stores with automatic rebuild capability."""
         store_paths = {
             "openai": OPENAI_DB_DIR,
             "google": GOOGLE_DB_DIR
         }
         
         for provider, db_path in store_paths.items():
-            if os.path.exists(db_path) and provider in self.embedding_models:
-                logger.info(f"Attempting to load {provider} vector store from {db_path}")
-                
-                # Use the safe loading function
-                vector_store = safe_vector_store_load(db_path, self.embedding_models[provider])
-                
-                if vector_store is not None:
-                    self.vector_stores[provider] = vector_store
-                    logger.info(f"✅ Successfully loaded {provider} vector store")
+            if provider in self.embedding_models:
+                if os.path.exists(db_path):
+                    logger.info(f"Attempting to load {provider} vector store from {db_path}")
+                    
+                    # Try the safe loading function
+                    vector_store = safe_vector_store_load(db_path, self.embedding_models[provider])
+                    
+                    if vector_store is not None:
+                        self.vector_stores[provider] = vector_store
+                        logger.info(f"✅ Successfully loaded {provider} vector store")
+                    else:
+                        # Loading failed completely - remove corrupted store and rebuild
+                        logger.warning(f"All loading attempts failed for {provider}. Rebuilding from document cache...")
+                        self._rebuild_store_from_cache(provider, db_path)
                 else:
-                    logger.error(f"❌ Failed to load {provider} vector store")
-            else:
-                if not os.path.exists(db_path):
-                    logger.warning(f"Vector store path does not exist: {db_path}")
-                if provider not in self.embedding_models:
-                    logger.warning(f"No embedding model available for provider: {provider}")
+                    logger.info(f"Vector store missing for {provider}, building from document cache...")
+                    self._rebuild_store_from_cache(provider, db_path)
+
+    def _rebuild_store_from_cache(self, provider: str, db_path: str):
+        """Rebuild vector store from document cache."""
+        try:
+            # Remove corrupted store
+            if os.path.exists(db_path):
+                import shutil
+                backup_path = f"{db_path}_corrupted_{int(time.time())}"
+                logger.info(f"Moving corrupted store to {backup_path}")
+                shutil.move(db_path, backup_path)
+            
+            # Load documents from cache
+            documents = self._load_from_document_cache()
+            
+            if not documents:
+                logger.error(f"No documents found in cache to rebuild {provider} store")
+                return
+            
+            logger.info(f"Rebuilding {provider} vector store with {len(documents)} documents")
+            
+            # Create vector store
+            texts = [doc.page_content for doc in documents]
+            metadatas = [doc.metadata for doc in documents]
+            
+            vector_store = FAISS.from_texts(
+                texts=texts,
+                embedding=self.embedding_models[provider],
+                metadatas=metadatas
+            )
+            
+            # Save the new store
+            os.makedirs(db_path, exist_ok=True)
+            vector_store.save_local(db_path)
+            
+            self.vector_stores[provider] = vector_store
+            logger.info(f"✅ Successfully rebuilt and loaded {provider} vector store")
+            
+        except Exception as e:
+            logger.error(f"Failed to rebuild {provider} store: {e}")
+
+    def _load_from_document_cache(self):
+        """Load documents from document_cache directory."""
+        documents = []
+        cache_dir = "document_cache"
+        
+        if not os.path.exists(cache_dir):
+            logger.error("document_cache directory not found")
+            return documents
+        
+        try:
+            for cache_file in Path(cache_dir).glob("*.json"):
+                logger.info(f"Loading from cache: {cache_file}")
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            content = item.get('content', item.get('page_content', ''))
+                            if content:
+                                documents.append(Document(
+                                    page_content=content,
+                                    metadata=item.get('metadata', {})
+                                ))
+            
+            logger.info(f"Loaded {len(documents)} documents from cache")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Error loading from document cache: {e}")
+            return []
     
     def analyze_query_complexity(self, query: str, has_image: bool = False) -> str:
         """Analyze query complexity for model selection."""
