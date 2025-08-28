@@ -971,13 +971,21 @@ class OptimizedRAGSystem:
     """Complete optimized RAG system with speed improvements and fixed issues"""
     
     def __init__(self):
-        logger.info("🚀 Initializing Enhanced RAG System with fixes...")
+        logger.info("Initializing Enhanced RAG System with fixes...")
         
-        self.router = create_smart_router()
+        # Add error handling for router creation
+        try:
+            logger.info("Creating smart router...")
+            self.router = create_smart_router()
+            logger.info("Smart router created successfully")
+        except Exception as e:
+            logger.error(f"Smart router creation failed: {e}")
+            self.router = None
+        
         self.templates = TemplateCache()
         self.connections = ConnectionManager()
-        self.detector = ResponseDetector()  # FIXED detector
-        self.ofsted = OfstedAnalyzer()       # Enhanced with HTML support
+        self.detector = ResponseDetector()
+        self.ofsted = OfstedAnalyzer()
         self.vision = VisionAnalyzer()
         self.cache = QueryCache()
         
@@ -986,7 +994,7 @@ class OptimizedRAGSystem:
             "avg_time": 0.0, "modes": {}, "speed_warnings": 0
         }
         
-        logger.info("✅ Enhanced RAG System ready with all fixes")
+        logger.info("Enhanced RAG System ready with all fixes")
     
     def query(self, question: str, k: int = 5, response_style: str = "standard",
               performance_mode: str = "balanced", uploaded_files: List = None,
@@ -1145,19 +1153,28 @@ class OptimizedRAGSystem:
     
     def _retrieve_docs(self, question: str, k: int) -> Dict[str, Any]:
         """Retrieve documents using SmartRouter"""
+        if self.router is None:
+            logger.warning("SmartRouter not available - returning empty result")
+            return {
+                "success": False,
+                "error": "SmartRouter not initialized",
+                "documents": [],
+                "response_time": 0
+            }
+        
         try:
-            logger.info(f"🔍 Retrieving {k} documents via SmartRouter")
+            logger.info(f"Retrieving {k} documents via SmartRouter")
             result = self.router.route_query(question, k=k)
             
             if result["success"]:
-                logger.info(f"✅ Retrieved {len(result['documents'])} documents")
+                logger.info(f"Retrieved {len(result['documents'])} documents")
             else:
-                logger.error(f"❌ SmartRouter retrieval failed: {result.get('error')}")
+                logger.error(f"SmartRouter retrieval failed: {result.get('error')}")
             
             return result
             
         except Exception as e:
-            logger.error(f"❌ SmartRouter error: {e}")
+            logger.error(f"SmartRouter error: {e}")
             return {
                 "success": False,
                 "error": str(e),
@@ -1474,30 +1491,22 @@ def create_rag_system(llm_provider: str = "openai", performance_mode: str = "bal
     Backward compatibility function for existing app.py
     Returns enhanced system with all fixes applied
     """
-    return OptimizedRAGSystem()
-
-    success = apply_emergency_speed_fixes(rag_system)
-    if success:
-        quick_speed_test(rag_system)
-
-
-    if success:
-        print("✅ Speed fixes applied successfully!")
+    try:
+        rag_system = OptimizedRAGSystem()
         
-        # Test the improvements
-        print("\n🧪 Testing speed improvements...")
-        test_results = quick_speed_test(rag_system)
+        # Apply speed fixes if system created successfully
+        try:
+            success = apply_emergency_speed_fixes(rag_system)
+            if success:
+                quick_speed_test(rag_system)
+        except Exception as e:
+            logger.warning(f"Speed fixes failed: {e}")
         
-        # Check if improvements worked
-        avg_time = sum(r["time"] for r in test_results if r["success"]) / max(1, len([r for r in test_results if r["success"]]))
+        return rag_system
         
-        if avg_time < 3.0:
-            print(f"\n🎉 SUCCESS! Average response time: {avg_time:.1f}s")
-        else:
-            print(f"\n⚠️ Partial improvement. Average time: {avg_time:.1f}s")
-            print("You may need additional optimizations.")
-    else:
-        print("❌ Speed fixes failed to apply")
+    except Exception as e:
+        logger.error(f"RAG system creation failed: {e}")
+        return None
 
 # Additional aliases for compatibility
 create_hybrid_rag_system = create_rag_system
