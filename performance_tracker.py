@@ -12,6 +12,9 @@ import plotly.graph_objects as go
 from pathlib import Path
 import hashlib
 import time
+from sqlalchemy import create_engine
+import warnings
+warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable.*', category=UserWarning)
 
 class PerformanceTracker:
     """
@@ -296,30 +299,32 @@ class PerformanceTracker:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        conn = sqlite3.connect(self.db_path)
+        # Create SQLAlchemy engine to eliminate pandas warnings
+        engine = create_engine(f'sqlite:///{self.db_path}')
         
-        # Query metrics
+        # Query metrics - FIXED: Using SQLAlchemy engine instead of direct connection
         query_df = pd.read_sql_query('''
         SELECT * FROM query_logs 
         WHERE timestamp >= ? AND timestamp <= ?
         ORDER BY timestamp DESC
-        ''', conn, params=(start_date, end_date))
+        ''', engine, params=(start_date, end_date))
         
-        # Feedback metrics
+        # Feedback metrics - FIXED: Using SQLAlchemy engine
         feedback_df = pd.read_sql_query('''
         SELECT uf.*, ql.query_category 
         FROM user_feedback uf
         JOIN query_logs ql ON uf.query_id = ql.id
         WHERE uf.timestamp >= ? AND uf.timestamp <= ?
-        ''', conn, params=(start_date, end_date))
+        ''', engine, params=(start_date, end_date))
         
-        # Feature usage
+        # Feature usage - FIXED: Using SQLAlchemy engine
         feature_df = pd.read_sql_query('''
         SELECT * FROM feature_usage 
         WHERE timestamp >= ? AND timestamp <= ?
-        ''', conn, params=(start_date, end_date))
+        ''', engine, params=(start_date, end_date))
         
-        conn.close()
+        # Close engine connection
+        engine.dispose()
         
         # Fix datetime conversion
         daily_queries = {}
@@ -328,7 +333,7 @@ class PerformanceTracker:
             query_df['timestamp'] = pd.to_datetime(query_df['timestamp'])
             daily_queries = query_df.groupby(query_df['timestamp'].dt.date).size().to_dict()
         
-        # Calculate key metrics
+        # Calculate key metrics (rest of your existing code remains the same)
         analytics_data = {
             'total_queries': len(query_df),
             'unique_users': query_df['user_id'].nunique() if not query_df.empty else 0,
@@ -352,6 +357,56 @@ class PerformanceTracker:
         }
         
         return analytics_data
+
+
+    def get_feedback_with_comments(self, days: int = 30) -> pd.DataFrame:
+        """Get feedback comments using SQLAlchemy to avoid pandas warnings."""
+        engine = create_engine(f'sqlite:///{self.db_path}')
+        
+        feedback_with_comments = pd.read_sql_query('''
+        SELECT 
+            uf.timestamp,
+            uf.rating,
+            uf.usefulness_score,
+            uf.accuracy_score, 
+            uf.clarity_score,
+            uf.feedback_text,
+            ql.query_category,
+            ql.query_text,
+            ql.response_time_seconds
+        FROM user_feedback uf
+        JOIN query_logs ql ON uf.query_id = ql.id
+        WHERE uf.feedback_text IS NOT NULL AND uf.feedback_text != ''
+        AND uf.timestamp >= ?
+        ORDER BY uf.timestamp DESC
+        LIMIT 50
+        ''', engine, params=(datetime.now() - timedelta(days=days),))
+        
+        engine.dispose()
+        return feedback_with_comments
+
+    def get_feedback_trends(self, days: int = 30) -> pd.DataFrame:
+        """Get feedback trends using SQLAlchemy to avoid pandas warnings."""
+        engine = create_engine(f'sqlite:///{self.db_path}')
+        
+        all_feedback = pd.read_sql_query('''
+        SELECT 
+            uf.timestamp,
+            uf.rating,
+            uf.usefulness_score,
+            uf.accuracy_score,
+            uf.clarity_score,
+            ql.query_category
+        FROM user_feedback uf
+        JOIN query_logs ql ON uf.query_id = ql.id
+        WHERE uf.timestamp >= ?
+        ORDER BY uf.timestamp
+        ''', engine, params=(datetime.now() - timedelta(days=days),))
+        
+        engine.dispose()
+        return all_feedback
+
+
 
 # Streamlit component for user feedback collection
 def show_feedback_widget(tracker: PerformanceTracker):
@@ -546,26 +601,7 @@ def show_analytics_dashboard(tracker: PerformanceTracker):
     st.markdown("### 💬 User Feedback Comments")
     
     # Get feedback with comments
-    conn = sqlite3.connect(tracker.db_path)
-    feedback_with_comments = pd.read_sql_query('''
-    SELECT 
-        uf.timestamp,
-        uf.rating,
-        uf.usefulness_score,
-        uf.accuracy_score, 
-        uf.clarity_score,
-        uf.feedback_text,
-        ql.query_category,
-        ql.query_text,
-        ql.response_time_seconds
-    FROM user_feedback uf
-    JOIN query_logs ql ON uf.query_id = ql.id
-    WHERE uf.feedback_text IS NOT NULL AND uf.feedback_text != ''
-    AND uf.timestamp >= ?
-    ORDER BY uf.timestamp DESC
-    LIMIT 50
-    ''', conn, params=(datetime.now() - timedelta(days=days),))
-    conn.close()
+    feedback_with_comments = tracker.get_feedback_with_comments(days)
     
     if not feedback_with_comments.empty:
         # Filter options
@@ -701,22 +737,8 @@ def show_analytics_dashboard(tracker: PerformanceTracker):
     # ADD FEEDBACK TRENDS ANALYSIS
     st.markdown("### 📊 Feedback Trends")
     
-    # Get all feedback for trend analysis
-    conn = sqlite3.connect(tracker.db_path)
-    all_feedback = pd.read_sql_query('''
-    SELECT 
-        uf.timestamp,
-        uf.rating,
-        uf.usefulness_score,
-        uf.accuracy_score,
-        uf.clarity_score,
-        ql.query_category
-    FROM user_feedback uf
-    JOIN query_logs ql ON uf.query_id = ql.id
-    WHERE uf.timestamp >= ?
-    ORDER BY uf.timestamp
-    ''', conn, params=(datetime.now() - timedelta(days=days),))
-    conn.close()
+    # Get all feedback for trend analysis using the fixed method
+    all_feedback = tracker.get_feedback_trends(days)
     
     if not all_feedback.empty:
         # Convert timestamp and create daily averages

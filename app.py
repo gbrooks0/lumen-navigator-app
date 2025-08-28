@@ -60,9 +60,14 @@ def setup_environment():
 def setup_sqlite():
     """SQLite setup for compatibility"""
     try:
-        __import__('pysqlite3')
-        sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+        import pysqlite3
+        import sys
+        sys.modules['sqlite3'] = pysqlite3
     except ImportError:
+        pass  # Use standard sqlite3
+    except Exception as e:
+        # Log the error but don't crash
+        print(f"SQLite setup warning: {e}")
         pass
 
 # RAG system initialization (only if files are available)
