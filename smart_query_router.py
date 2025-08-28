@@ -664,26 +664,27 @@ class SmartRouter:
             "google": GOOGLE_DB_DIR
         }
         
+        cached_documents = None  # Load documents once if needed
+        
         for provider, db_path in store_paths.items():
             if provider in self.embedding_models:
                 if os.path.exists(db_path):
-                    logger.info(f"Attempting to load {provider} vector store from {db_path}")
-                    
-                    # Try the safe loading function
                     vector_store = safe_vector_store_load(db_path, self.embedding_models[provider])
                     
                     if vector_store is not None:
                         self.vector_stores[provider] = vector_store
-                        logger.info(f"✅ Successfully loaded {provider} vector store")
+                        logger.info(f"Successfully loaded {provider} vector store")
                     else:
-                        # Loading failed completely - remove corrupted store and rebuild
-                        logger.warning(f"All loading attempts failed for {provider}. Rebuilding from document cache...")
-                        self._rebuild_store_from_cache(provider, db_path)
+                        # Load documents once for all rebuilds
+                        if cached_documents is None:
+                            cached_documents = self._load_from_document_cache()
+                        self._rebuild_store_from_cache(provider, db_path, cached_documents)
                 else:
-                    logger.info(f"Vector store missing for {provider}, building from document cache...")
-                    self._rebuild_store_from_cache(provider, db_path)
+                    if cached_documents is None:
+                        cached_documents = self._load_from_document_cache()
+                    self._rebuild_store_from_cache(provider, db_path, cached_documents)
 
-    def _rebuild_store_from_cache(self, provider: str, db_path: str):
+    def _rebuild_store_from_cache(self, provider: str, db_path: str, cached_documents: List[Document] = None):
         """Rebuild vector store from document cache."""
         try:
             # Remove corrupted store
@@ -693,8 +694,11 @@ class SmartRouter:
                 logger.info(f"Moving corrupted store to {backup_path}")
                 shutil.move(db_path, backup_path)
             
-            # Load documents from cache
-            documents = self._load_from_document_cache()
+            # Use provided documents or load from cache
+            if cached_documents is None:
+                documents = self._load_from_document_cache()
+            else:
+                documents = cached_documents
             
             if not documents:
                 logger.error(f"No documents found in cache to rebuild {provider} store")
@@ -717,7 +721,7 @@ class SmartRouter:
             vector_store.save_local(db_path)
             
             self.vector_stores[provider] = vector_store
-            logger.info(f"✅ Successfully rebuilt and loaded {provider} vector store")
+            logger.info(f"Successfully rebuilt and loaded {provider} vector store")
             
         except Exception as e:
             logger.error(f"Failed to rebuild {provider} store: {e}")
@@ -732,8 +736,10 @@ class SmartRouter:
             return documents
         
         try:
-            for cache_file in Path(cache_dir).glob("*.json"):
-                logger.info(f"Loading from cache: {cache_file}")
+            cache_files = list(Path(cache_dir).glob("*.json"))
+            logger.info(f"Loading documents from {len(cache_files)} cache files...")
+            
+            for cache_file in cache_files:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
@@ -753,7 +759,7 @@ class SmartRouter:
         except Exception as e:
             logger.error(f"Error loading from document cache: {e}")
             return []
-    
+        
     def analyze_query_complexity(self, query: str, has_image: bool = False) -> str:
         """Analyze query complexity for model selection."""
         try:
