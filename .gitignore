@@ -1,0 +1,26 @@
+# Virtual Environment
+venv/
+
+# Vector Database
+
+# Ignore the local secrets folder
+.streamlit/secrets.toml
+
+# faiss_index/
+
+# Python Caches
+__pycache__/
+*.pyc
+
+# macOS specific files
+.DS_Store
+
+# Ignore any cache folders
+document_cache/
+.env
+*.db
+*.log
+faiss_index/
+indexes/
+*.faiss
+*.pkl
