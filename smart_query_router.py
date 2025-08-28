@@ -706,15 +706,11 @@ class SmartRouter:
             
             logger.info(f"Rebuilding {provider} vector store with {len(documents)} documents")
             
-            # Create vector store
+            # Create vector store with retry logic
             texts = [doc.page_content for doc in documents]
             metadatas = [doc.metadata for doc in documents]
             
-            vector_store = FAISS.from_texts(
-                texts=texts,
-                embedding=self.embedding_models[provider],
-                metadatas=metadatas
-            )
+            vector_store = self._create_vector_store_with_retry(provider, texts, metadatas)
             
             # Save the new store
             os.makedirs(db_path, exist_ok=True)
@@ -725,6 +721,7 @@ class SmartRouter:
             
         except Exception as e:
             logger.error(f"Failed to rebuild {provider} store: {e}")
+            # Continue without this provider rather than failing completely
 
     def _load_from_document_cache(self):
         """Load documents from document_cache directory."""
@@ -759,7 +756,36 @@ class SmartRouter:
         except Exception as e:
             logger.error(f"Error loading from document cache: {e}")
             return []
+
+    def _create_vector_store_with_retry(self, provider: str, texts: List[str], metadatas: List[Dict], max_retries: int = 3):
+        """Create vector store with retry logic for API rate limits."""
+        for attempt in range(max_retries):
+            try:
+                if provider == "google":
+                    # Add delay for Google to avoid rate limits
+                    time.sleep(2)
+                    
+                vector_store = FAISS.from_texts(
+                    texts=texts,
+                    embedding=self.embedding_models[provider],
+                    metadatas=metadatas
+                )
+                return vector_store
+                
+            except Exception as e:
+                if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+                    wait_time = (attempt + 1) * 5  # Exponential backoff
+                    logger.warning(f"Rate limit hit for {provider}, waiting {wait_time}s (attempt {attempt + 1})")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Vector store creation failed for {provider} (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(2)
         
+        raise Exception(f"Failed to create vector store for {provider} after {max_retries} attempts")
+
+       
     def analyze_query_complexity(self, query: str, has_image: bool = False) -> str:
         """Analyze query complexity for model selection."""
         try:
