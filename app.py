@@ -70,52 +70,33 @@ def setup_sqlite():
 def initialize_rag_system():
     """Initialize RAG system if available"""
     if not RAG_SYSTEM_AVAILABLE:
-        st.error("RAG_SYSTEM_AVAILABLE is False")
         return None
         
     try:
-        # Check what directories exist
+        # Check what directories exist (no debug output)
         faiss_exists = os.path.exists("faiss_index")
         indexes_exists = os.path.exists("indexes")
         
-        st.write(f"Debug: faiss_index exists: {faiss_exists}")
-        st.write(f"Debug: indexes exists: {indexes_exists}")
-        
-        # Check for actual vector database files in your directory structure
+        # Check for actual vector database files
         has_vector_db = False
         if indexes_exists:
-            # Check for vector files in your actual structure
             google_index_exists = os.path.exists("indexes/google_index")
             openai_index_exists = os.path.exists("indexes/openai_index")
-            
-            st.write(f"Debug: indexes/google_index exists: {google_index_exists}")
-            st.write(f"Debug: indexes/openai_index exists: {openai_index_exists}")
-            
             has_vector_db = google_index_exists or openai_index_exists
         elif faiss_exists:
-            # Check for files in faiss_index if it exists
             faiss_files = os.listdir("faiss_index") if faiss_exists else []
             has_vector_db = any(f.endswith(('.faiss', '.pkl')) for f in faiss_files)
-            st.write(f"Debug: faiss_index files: {faiss_files}")
         
         if not has_vector_db:
-            st.warning("Vector database files not found - some features may be limited")
+            st.warning("Vector database not found - some features may be limited")
             return None
         
-        # Try to create the system
-        st.write("Debug: Attempting to create RAG system...")
+        # Create the system without debug output
         rag_system = create_rag_system()
-        
-        if rag_system:
-            st.success("Debug: RAG system created successfully")
-        else:
-            st.error("Debug: create_rag_system() returned None")
-            
         return rag_system
         
     except Exception as e:
-        st.error(f"RAG System Error: {e}")
-        st.write(f"Debug: Full error details: {type(e).__name__}: {str(e)}")
+        st.error(f"RAG System Error: {str(e)}")
         return None
 
 # Enhanced CSS Styles matching website design
