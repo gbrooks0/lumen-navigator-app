@@ -498,17 +498,79 @@ class VisionPerformanceTracker(PerformanceTracker):
 # =============================================================================
 
 class QueryAnalyzer:
-    """Analyzes queries to determine optimal routing strategy."""
+    """Enhanced query analyzer that detects authority requirements and adaptive retrieval needs."""
     
     def __init__(self):
-        self.patterns = ROUTING_CONFIG["query_patterns"]
+        # Add temporal detection patterns
+        self.temporal_patterns = [
+            r'\blatest\b', r'\brecent\b', r'\bcurrent\b', r'\bnew\b', r'\bupdated\b',
+            r'\b202[4-9]\b', r'\bthis year\b', r'\blast year\b', r'\btoday\b',
+            r'\bchanges?\s+(?:to|in|for)\b', r'\brevised?\b', r'\bamended?\b'
+        ]
+
+        # Comparison detection patterns
+        self.comparison_patterns = [
+            r'\bcompare\b', r'\bversus\b', r'\bvs\.?\b', r'\bdifference[s]?\s+between\b',
+            r'\bcontrast\b', r'\bbetter\s+than\b', r'\bworse\s+than\b',
+            r'\bkey\s+differences?\b', r'\bhow\s+(?:do|does)\s+.*\s+differ\b',
+            r'\bsimilarit(?:ies|y)\s+(?:and\s+)?differences?\b'
+        ]
+        
+        # Your existing patterns from ROUTING_CONFIG
+        self.patterns = {
+            "technical": {
+                "keywords": ["code", "programming", "api", "algorithm", "software", "development"],
+                "preferred_provider": "openai",
+                "confidence_boost": 0.15
+            },
+            "legal": {
+                "keywords": ["regulation", "compliance", "policy", "framework", "guidance", "law"],
+                "preferred_provider": "google", 
+                "confidence_boost": 0.10
+            },
+            "general": {
+                "keywords": ["what", "how", "why", "explain", "describe", "tell", "help", "show"],
+                "preferred_provider": "openai",
+                "confidence_boost": 0.05
+            }
+        }
+        
+        # NEW: Add retrieval sizing patterns
+        self.retrieval_patterns = {
+            "single_fact": {
+                "keywords": ["what is", "define", "who is", "when was", "where is"],
+                "optimal_k": 3,
+                "max_k": 5
+            },
+            "specific_list": {
+                "keywords": ["what are the", "list the", "9 quality standards", "how many"],
+                "optimal_k": 2,
+                "max_k": 4
+            },
+            "comparison": {
+                "keywords": ["compare", "difference between", "versus", "contrast"],
+                "optimal_k": 6,
+                "max_k": 8
+            },
+            "comprehensive": {
+                "keywords": ["explain", "describe", "how to", "process", "procedure"],
+                "optimal_k": 5,
+                "max_k": 8
+            }
+        }
     
     def analyze_query(self, query: str) -> Dict[str, Any]:
-        """Analyze query to determine pattern and routing preferences."""
+        """Enhanced query analysis with temporal awareness, comparison detection, and adaptive retrieval sizing."""
         try:
             query_lower = query.lower()
             
-            # Calculate pattern scores
+            # ISSUE #1 FIX: Detect temporal queries and add knowledge currency warning
+            is_temporal = any(re.search(pattern, query_lower) for pattern in self.temporal_patterns)
+            
+            # ISSUE #2 FIX: Detect comparison queries that need more documents
+            is_comparison = any(re.search(pattern, query_lower) for pattern in self.comparison_patterns)
+            
+            # Existing pattern analysis
             pattern_scores = {}
             for pattern_name, pattern_config in self.patterns.items():
                 score = 0.0
@@ -518,10 +580,7 @@ class QueryAnalyzer:
                     if keyword in query_lower:
                         score += 1.0
                         keywords_found.append(keyword)
-                    elif any(keyword in word for word in query_lower.split()):
-                        score += 0.5
                 
-                # Normalize by number of keywords in pattern
                 if len(pattern_config["keywords"]) > 0:
                     score = score / len(pattern_config["keywords"])
                 
@@ -537,14 +596,13 @@ class QueryAnalyzer:
             pattern_name = best_pattern[0]
             pattern_data = best_pattern[1]
             
-            # Calculate overall confidence
+            # Calculate confidence
             base_confidence = min(pattern_data["score"], 1.0)
             confidence = base_confidence + pattern_data["confidence_boost"]
             confidence = min(confidence, 1.0)
             
-            # Additional analysis
-            query_length = len(query.split())
-            complexity_score = min(query_length / 20.0, 1.0)
+            # ISSUE #2 FIX: Determine optimal k with comparison boost
+            optimal_k, max_k = self._determine_optimal_k(query_lower, is_comparison)
             
             return {
                 "query": query,
@@ -552,25 +610,64 @@ class QueryAnalyzer:
                 "pattern_confidence": confidence,
                 "preferred_provider": pattern_data["preferred_provider"],
                 "keywords_found": pattern_data["keywords_found"],
-                "query_length": query_length,
-                "complexity_score": complexity_score,
+                "query_length": len(query.split()),
                 "all_pattern_scores": pattern_scores,
+                "optimal_k": optimal_k,
+                "max_k": max_k,
+                "is_temporal": is_temporal,  # NEW: Temporal detection
+                "is_comparison": is_comparison,  # NEW: Comparison detection
+                "needs_currency_disclaimer": is_temporal,  # NEW: Currency warning flag
                 "analysis_timestamp": datetime.now().isoformat()
             }
         except Exception as e:
-            logger.error(f"Error analyzing query: {e}")
             return {
                 "query": query,
                 "best_pattern": "general",
                 "pattern_confidence": 0.5,
-                "preferred_provider": ROUTING_CONFIG["default_provider"],
+                "preferred_provider": "openai",
                 "keywords_found": [],
                 "query_length": len(query.split()),
-                "complexity_score": 0.5,
-                "all_pattern_scores": {},
-                "analysis_timestamp": datetime.now().isoformat(),
+                "optimal_k": 5,
+                "max_k": 7,
+                "is_temporal": False,
+                "is_comparison": False,
+                "needs_currency_disclaimer": False,
                 "error": str(e)
             }
+
+    def _determine_optimal_k(self, query_lower: str, is_comparison: bool = False) -> tuple:
+        """Determine optimal number of documents based on query type with comparison detection."""
+        
+        # ISSUE #2 FIX: Comparison queries need more documents
+        if is_comparison:
+            return 7, 10  # Increased for proper comparative analysis
+        
+        # Check retrieval patterns
+        for pattern_name, pattern_config in self.retrieval_patterns.items():
+            for keyword in pattern_config["keywords"]:
+                if keyword in query_lower:
+                    return pattern_config["optimal_k"], pattern_config["max_k"]
+        
+        # Query length heuristics
+        word_count = len(query_lower.split())
+        if word_count <= 5:
+            return 3, 5
+        elif word_count <= 10:
+            return 5, 7
+        else:
+            return 7, 10
+    
+    def _determine_retrieval_strategy(self, query_lower: str, analysis: Dict) -> str:
+        """Determine retrieval strategy for efficiency."""
+        if analysis.get("requires_authoritative") and analysis.get("requires_comprehensive"):
+            return "authoritative_then_expand"
+        elif "what are the" in query_lower and any(x in query_lower for x in ["standards", "requirements", "regulations"]):
+            return "precision_first"
+        elif analysis.get("query_complexity") == "high":
+            return "comprehensive_search"
+        else:
+            return "standard_adaptive"
+
 
 # =============================================================================
 # ENHANCED SMART ROUTER
@@ -589,6 +686,15 @@ class SmartRouter:
         
         # Load models and stores with error handling
         self.load_embedding_models()
+        
+        # ADD: Validate embedding consistency before loading vector stores
+        validation = self.validate_embedding_consistency()
+        inconsistent_models = [p for p, v in validation.items() if v.get("status") == "dimension_mismatch"]
+        
+        if inconsistent_models:
+            logger.error(f"Embedding dimension mismatches detected: {inconsistent_models}")
+            logger.error("Vector stores may fail to load. Consider rebuilding indexes with consistent models.")
+        
         self.load_vector_stores()
     
     def set_performance_mode(self, mode: str):
@@ -613,17 +719,24 @@ class SmartRouter:
                     if info.get("status") == "active":
                         try:
                             if provider == "openai":
+                                # Use the model from metadata but default to text-embedding-3-small
+                                model_name = info.get("model", "text-embedding-3-small")
+                                # FORCE CONSISTENCY: Override large model if found
+                                if model_name == "text-embedding-3-large":
+                                    model_name = "text-embedding-3-small"
+                                    logger.warning(f"Overriding {provider} model to text-embedding-3-small for consistency")
+                                
                                 self.embedding_models[provider] = OpenAIEmbeddings(
-                                    model=info.get("model", "text-embedding-3-small"),
+                                    model=model_name,
                                     show_progress_bar=False
                                 )
                             elif provider == "google":
                                 self.embedding_models[provider] = GoogleGenerativeAIEmbeddings(
-                                    model=info.get("model", "models/embedding-001")
+                                    model=info.get("model", "models/text-embedding-004")
                                 )
                             logger.info(f"✅ Loaded {provider} embedding model")
                         except Exception as e:
-                            logger.error(f"❌ Failed to load {provider} embedding model: {e}")
+                            logger.error(f"⚠ Failed to load {provider} embedding model: {e}")
             except Exception as e:
                 logger.warning(f"Failed to load model info from {model_info_file}: {e}")
         
@@ -638,17 +751,17 @@ class SmartRouter:
             # Try OpenAI first
             try:
                 self.embedding_models["openai"] = OpenAIEmbeddings(
-                    model="text-embedding-3-small",
+                    model="text-embedding-3-small",  # CHANGED from text-embedding-3-large
                     show_progress_bar=False
                 )
                 logger.info("✅ Loaded default OpenAI embedding model")
             except Exception as e:
                 logger.warning(f"Failed to load default OpenAI model: {e}")
             
-            # Try Google
+            # Try Google - this stays the same
             try:
                 self.embedding_models["google"] = GoogleGenerativeAIEmbeddings(
-                    model="models/embedding-001"
+                    model="models/text-embedding-004"  # This can stay as is
                 )
                 logger.info("✅ Loaded default Google embedding model")
             except Exception as e:
@@ -664,7 +777,7 @@ class SmartRouter:
             "google": GOOGLE_DB_DIR
         }
         
-        cached_documents = None  # Load documents once if needed
+        cached_documents = None
         
         for provider, db_path in store_paths.items():
             if provider in self.embedding_models:
@@ -672,8 +785,30 @@ class SmartRouter:
                     vector_store = safe_vector_store_load(db_path, self.embedding_models[provider])
                     
                     if vector_store is not None:
-                        self.vector_stores[provider] = vector_store
-                        logger.info(f"Successfully loaded {provider} vector store")
+                        # Validate dimensions match
+                        try:
+                            test_embedding = self.embedding_models[provider].embed_query("test")
+                            expected_dims = len(test_embedding)
+                            
+                            # Check if vector store dimensions match
+                            if hasattr(vector_store, 'index') and hasattr(vector_store.index, 'd'):
+                                store_dims = vector_store.index.d
+                                if store_dims != expected_dims:
+                                    logger.error(f"Dimension mismatch for {provider}: store has {store_dims}, model expects {expected_dims}")
+                                    logger.info(f"Rebuilding {provider} store due to dimension mismatch")
+                                    # Trigger rebuild
+                                    if cached_documents is None:
+                                        cached_documents = self._load_from_document_cache()
+                                    self._rebuild_store_from_cache(provider, db_path, cached_documents)
+                                    continue
+                            
+                            self.vector_stores[provider] = vector_store
+                            logger.info(f"Successfully loaded {provider} vector store")
+                            
+                        except Exception as validation_error:
+                            logger.error(f"Error validating {provider} store: {validation_error}")
+                            self.vector_stores[provider] = vector_store  # Use anyway
+                            
                     else:
                         # Load documents once for all rebuilds
                         if cached_documents is None:
@@ -683,6 +818,44 @@ class SmartRouter:
                     if cached_documents is None:
                         cached_documents = self._load_from_document_cache()
                     self._rebuild_store_from_cache(provider, db_path, cached_documents)
+
+    def validate_embedding_consistency(self) -> Dict[str, Any]:
+        """Validate that embedding models match existing vector store dimensions."""
+        validation_results = {}
+        
+        for provider, model in self.embedding_models.items():
+            try:
+                # Test embedding to get actual dimensions
+                test_embedding = model.embed_query("test")
+                actual_dims = len(test_embedding)
+                
+                # Check against expected dimensions for consistency
+                expected_dims = {
+                    "openai": 1536,  # text-embedding-3-small
+                    "google": 768    # text-embedding-004
+                }
+                
+                expected = expected_dims.get(provider, actual_dims)
+                is_consistent = actual_dims == expected
+                
+                validation_results[provider] = {
+                    "model": getattr(model, 'model', 'unknown'),
+                    "actual_dimensions": actual_dims,
+                    "expected_dimensions": expected,
+                    "is_consistent": is_consistent,
+                    "status": "valid" if is_consistent else "dimension_mismatch"
+                }
+                
+                if not is_consistent:
+                    logger.error(f"Dimension mismatch for {provider}: got {actual_dims}, expected {expected}")
+                
+            except Exception as e:
+                validation_results[provider] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        return validation_results
 
     def _rebuild_store_from_cache(self, provider: str, db_path: str, cached_documents: List[Document] = None):
         """Rebuild vector store from document cache."""
@@ -785,7 +958,52 @@ class SmartRouter:
         
         raise Exception(f"Failed to create vector store for {provider} after {max_retries} attempts")
 
-       
+    def route_query(self, query: str, k: int = 5, force_provider: str = None) -> Dict[str, Any]:
+        """Route query to optimal embedding provider and return results."""
+        start_time = time.time()
+        
+        try:
+            # Check if any vector stores are available
+            if not self.vector_stores:
+                return {
+                    "success": False,
+                    "error": "No vector stores available",
+                    "documents": [],
+                    "total_results": 0,
+                    "response_time": time.time() - start_time,
+                    "provider": "none",
+                    "timestamp": datetime.now().isoformat()
+                }
+            
+            # Use adaptive k if k is None
+            analysis = self.query_analyzer.analyze_query(query)
+            if k is None:
+                k = analysis.get("optimal_k", 5)
+            
+            # Select provider
+            if force_provider:
+                selected_provider = force_provider
+            else:
+                selected_provider = self._select_provider(analysis)
+            
+            # Execute query
+            result = self._execute_query(selected_provider, query, k, start_time, analysis)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Critical error in route_query: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "documents": [],
+                "total_results": 0,
+                "response_time": time.time() - start_time,
+                "provider": "error",
+                "timestamp": datetime.now().isoformat()
+            }       
+
+
     def analyze_query_complexity(self, query: str, has_image: bool = False) -> str:
         """Analyze query complexity for model selection."""
         try:
@@ -816,57 +1034,44 @@ class SmartRouter:
             logger.error(f"Error analyzing query complexity: {e}")
             return "medium"
     
-    def route_query(self, query: str, k: int = 5, force_provider: str = None) -> Dict[str, Any]:
-        """Route query to optimal embedding provider and return results."""
+    def enhanced_route_query(self, query: str, k: int = None, force_provider: str = None) -> Dict[str, Any]:
+        """Enhanced routing with adaptive document retrieval."""
         start_time = time.time()
         
         try:
-            # Check if any vector stores are available
-            if not self.vector_stores:
-                return {
-                    "success": False,
-                    "error": "No vector stores available",
-                    "documents": [],
-                    "total_results": 0,
-                    "response_time": time.time() - start_time,
-                    "provider": "none",
-                    "used_fallback": False,
-                    "timestamp": datetime.now().isoformat()
-                }
+            # Enhanced query analysis
+            analysis = self.query_analyzer.analyze_query(query)
             
-            # Analyze query if not forcing provider
+            # Use adaptive k if not specified
+            if k is None:
+                k = analysis.get("optimal_k", 5)
+            
+            # Get retrieval strategy
+            retrieval_strategy = analysis.get("retrieval_strategy", "standard_adaptive")
+            
+            # Select provider
             if force_provider:
                 selected_provider = force_provider
-                analysis = {"forced": True, "provider": force_provider}
             else:
-                analysis = self.query_analyzer.analyze_query(query)
-                selected_provider = self._select_provider(analysis)
+                routing_decision = analysis["final_routing_decision"]
+                selected_provider = routing_decision["provider_preference"]
             
-            # Attempt query with selected provider
-            result = self._execute_query(selected_provider, query, k, start_time, analysis)
+            if selected_provider not in self.vector_stores:
+                available_providers = list(self.vector_stores.keys())
+                selected_provider = available_providers[0] if available_providers else None
             
-            # Fallback logic if primary attempt fails
-            if not result["success"] and not force_provider:
-                logger.warning(f"Primary provider {selected_provider} failed, trying fallback")
-                fallback_provider = self._get_fallback_provider(selected_provider)
-                if fallback_provider and fallback_provider != selected_provider:
-                    result = self._execute_query(fallback_provider, query, k, start_time, analysis)
-                    result["used_fallback"] = True
+            if not selected_provider:
+                return self._create_error_response("No vector stores available", analysis, start_time)
+            
+            # Execute adaptive retrieval
+            result = self._execute_adaptive_retrieval(
+                selected_provider, query, k, start_time, analysis, retrieval_strategy
+            )
             
             return result
             
         except Exception as e:
-            logger.error(f"Critical error in route_query: {e}")
-            return {
-                "success": False,
-                "error": f"Critical routing error: {str(e)}",
-                "documents": [],
-                "total_results": 0,
-                "response_time": time.time() - start_time,
-                "provider": "error",
-                "used_fallback": False,
-                "timestamp": datetime.now().isoformat()
-            }
+            return self._create_error_response(str(e), analysis if 'analysis' in locals() else {}, start_time)
     
     def route_multimodal_query(self, query: str, image_data: bytes = None, 
                               image_size_kb: int = None, k: int = 5) -> Dict[str, Any]:
@@ -1028,6 +1233,160 @@ class SmartRouter:
                 "timestamp": datetime.now().isoformat()
             }
     
+    def _execute_adaptive_retrieval(self, provider: str, query: str, k: int, 
+                                   start_time: float, analysis: Dict[str, Any], 
+                                   strategy: str) -> Dict[str, Any]:
+        """Execute retrieval with adaptive strategies for efficiency."""
+        try:
+            vector_store = self.vector_stores[provider]
+            
+            if strategy == "precision_first":
+                # For specific queries like "what are the 9 standards", try small k first
+                return self._precision_first_retrieval(vector_store, provider, query, k, analysis, start_time)
+            
+            elif strategy == "authoritative_then_expand":
+                # Get authoritative sources first, expand if needed
+                return self._authoritative_then_expand_retrieval(vector_store, provider, query, k, analysis, start_time)
+            
+            elif strategy == "comprehensive_search":
+                # Complex queries need broader search
+                return self._comprehensive_retrieval(vector_store, provider, query, k, analysis, start_time)
+            
+            else:
+                # Standard adaptive retrieval
+                return self._standard_adaptive_retrieval(vector_store, provider, query, k, analysis, start_time)
+                
+        except Exception as e:
+            return self._create_error_response(f"Adaptive retrieval failed: {str(e)}", analysis, start_time)
+
+
+    def _precision_first_retrieval(self, vector_store, provider: str, query: str, 
+                                  k: int, analysis: Dict, start_time: float) -> Dict[str, Any]:
+        """Precision-first retrieval for specific queries."""
+        try:
+            # Start with small retrieval
+            initial_k = min(3, k)
+            docs = vector_store.similarity_search(query, k=initial_k)
+            
+            # Check if we have high-authority results
+            high_authority_docs = [
+                doc for doc in docs 
+                if doc.metadata.get('authority_level', 0) >= 0.8
+            ]
+            
+            # If we have good authoritative results, we might be done
+            if len(high_authority_docs) >= 1 and analysis.get("requires_authoritative"):
+                # Check if the top result seems comprehensive
+                top_doc = high_authority_docs[0]
+                if (top_doc.metadata.get('is_primary_source', False) or 
+                    len(top_doc.metadata.get('standards_covered', [])) > 0):
+                    
+                    # We likely have what we need, but get one more for context
+                    final_k = min(initial_k + 1, k)
+                    if final_k > len(docs):
+                        docs = vector_store.similarity_search(query, k=final_k)
+                    
+                    return self._create_success_response(
+                        docs[:final_k], provider, analysis, start_time, 
+                        f"Precision retrieval: found authoritative source with k={final_k}"
+                    )
+            
+            # Need more documents
+            if k > initial_k:
+                docs = vector_store.similarity_search(query, k=k)
+            
+            return self._create_success_response(docs, provider, analysis, start_time, "Standard retrieval after precision check")
+            
+        except Exception as e:
+            return self._create_error_response(f"Precision retrieval failed: {str(e)}", analysis, start_time)
+
+
+    def _authoritative_then_expand_retrieval(self, vector_store, provider: str, query: str,
+                                           k: int, analysis: Dict, start_time: float) -> Dict[str, Any]:
+        """Get authoritative sources first, then expand if needed."""
+        try:
+            # Get more candidates for filtering
+            search_k = min(k * 2, 20)
+            candidates = vector_store.similarity_search_with_score(query, k=search_k)
+            
+            # Separate by authority level
+            high_authority = []
+            medium_authority = []
+            other_docs = []
+            
+            for doc, score in candidates:
+                authority = doc.metadata.get('authority_level', 0)
+                if authority >= 0.8:
+                    high_authority.append((doc, score))
+                elif authority >= 0.6:
+                    medium_authority.append((doc, score))
+                else:
+                    other_docs.append((doc, score))
+            
+            # Build result set prioritizing authority
+            final_docs = []
+            
+            # Add high authority docs first (up to 60% of k)
+            high_authority_limit = max(1, int(k * 0.6))
+            final_docs.extend([doc for doc, _ in high_authority[:high_authority_limit]])
+            
+            # Fill remaining with medium authority
+            remaining = k - len(final_docs)
+            if remaining > 0:
+                final_docs.extend([doc for doc, _ in medium_authority[:remaining]])
+            
+            # Fill any remaining with other docs
+            remaining = k - len(final_docs)
+            if remaining > 0:
+                final_docs.extend([doc for doc, _ in other_docs[:remaining]])
+            
+            return self._create_success_response(
+                final_docs, provider, analysis, start_time,
+                f"Authority-first retrieval: {len([d for d in final_docs if d.metadata.get('authority_level', 0) >= 0.8])} high-authority docs"
+            )
+            
+        except Exception as e:
+            return self._create_error_response(f"Authoritative retrieval failed: {str(e)}", analysis, start_time)
+
+
+    def _comprehensive_retrieval(self, vector_store, provider: str, query: str,
+                                k: int, analysis: Dict, start_time: float) -> Dict[str, Any]:
+        """Comprehensive retrieval for complex queries."""
+        try:
+            # Use the full k for complex queries, but ensure diversity
+            docs = vector_store.similarity_search(query, k=k)
+            
+            # Apply diversity filtering to avoid too many chunks from same source
+            diverse_docs = self._apply_diversity_filter(docs, max_per_source=3)
+            
+            return self._create_success_response(
+                diverse_docs, provider, analysis, start_time, 
+                f"Comprehensive retrieval with diversity filtering"
+            )
+            
+        except Exception as e:
+            return self._create_error_response(f"Comprehensive retrieval failed: {str(e)}", analysis, start_time)
+
+
+    def _standard_adaptive_retrieval(self, vector_store, provider: str, query: str,
+                                   k: int, analysis: Dict, start_time: float) -> Dict[str, Any]:
+        """Standard adaptive retrieval with smart k adjustment."""
+        try:
+            docs = vector_store.similarity_search(query, k=k)
+            
+            # For simple queries, check if we can reduce the result set
+            if k > 3 and analysis.get("query_complexity", "medium") == "low":
+                # Check if first few results are highly relevant and authoritative
+                top_docs = docs[:3]
+                if any(doc.metadata.get('authority_level', 0) >= 0.8 for doc in top_docs):
+                    # We might have sufficient results with fewer docs
+                    docs = docs[:min(k, 4)]
+            
+            return self._create_success_response(docs, provider, analysis, start_time, "Standard adaptive retrieval")
+            
+        except Exception as e:
+            return self._create_error_response(f"Standard retrieval failed: {str(e)}", analysis, start_time)
+
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary for all providers."""
         try:
@@ -1143,6 +1502,49 @@ class SmartRouter:
         
         return health_status
 
+    def _apply_diversity_filter(self, docs: List, max_per_source: int = 3) -> List:
+        """Apply diversity filtering to avoid too many chunks from same source."""
+        source_counts = {}
+        filtered_docs = []
+        
+        for doc in docs:
+            source = doc.metadata.get('source', 'unknown')
+            count = source_counts.get(source, 0)
+            
+            if count < max_per_source:
+                filtered_docs.append(doc)
+                source_counts[source] = count + 1
+        
+        return filtered_docs
+
+
+    def _create_success_response(self, docs: List, provider: str, analysis: Dict, 
+                               start_time: float, retrieval_note: str) -> Dict[str, Any]:
+        """Create a standardized success response."""
+        return {
+            "success": True,
+            "provider": provider,
+            "documents": docs,
+            "total_results": len(docs),
+            "response_time": time.time() - start_time,
+            "analysis": analysis,
+            "retrieval_strategy": retrieval_note,
+            "authority_filtered": analysis.get("requires_authoritative", False),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+    def _create_error_response(self, error_msg: str, analysis: Dict, start_time: float) -> Dict[str, Any]:
+        """Create a standardized error response."""
+        return {
+            "success": False,
+            "error": error_msg,
+            "documents": [],
+            "response_time": time.time() - start_time,
+            "analysis": analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+
 # =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
@@ -1206,6 +1608,28 @@ def diagnose_vector_stores() -> Dict[str, Any]:
                 diagnosis["directories"][name]["error"] = str(e)
     
     return diagnosis
+
+def test_adaptive_retrieval():
+    """Test adaptive retrieval with different query types."""
+    router = SmartRouter()  # Your router instance
+    
+    test_queries = [
+        ("What are the 9 quality standards?", "Should use k=2-3"),
+        ("Define safeguarding", "Should use k=3"),
+        ("How do I implement quality standards in practice?", "Should use k=5-6"),
+        ("Compare children's homes regulations with fostering standards", "Should use k=6-8"),
+        ("Analyze the effectiveness of current child protection policies", "Should use k=8-10")
+    ]
+    
+    for query, expectation in test_queries:
+        print(f"\nQuery: {query}")
+        print(f"Expected: {expectation}")
+        
+        result = router.enhanced_route_query(query)
+        if result["success"]:
+            print(f"Actual: k={result['total_results']}, strategy='{result['retrieval_strategy']}'")
+        else:
+            print(f"Failed: {result['error']}")
 
 # =============================================================================
 # EXAMPLE USAGE AND TESTING

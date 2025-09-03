@@ -89,13 +89,13 @@ LAST_UPDATE_FILE = os.path.join(METADATA_DIR, "last_update.json")
 # Embedding configuration (preserved from your original)
 EMBEDDING_MODELS = {
     "openai": {
-        "model": "text-embedding-3-large",
-        "dimensions": 3072,  # text-embedding-3-large dimensions
-        "description": "High-performance OpenAI embedding model"
+        "model": "text-embedding-3-small",  # 1536 dimensions
+        "dimensions": 1536,
+        "description": "OpenAI embedding model - consistent with existing indexes"
     },
     "google": {
         "model": "models/text-embedding-004", 
-        "dimensions": 768,   # text-embedding-004 dimensions
+        "dimensions": 768,
         "description": "Google Gemini embedding model"
     }
 }
@@ -157,6 +157,131 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def detect_document_authority(document: Document) -> float:
+    """
+    Detect document authority level during ingestion.
+    Returns score 0.0-1.0 where 1.0 is highest authority.
+    """
+    content = document.page_content.lower()
+    title = document.metadata.get("title", "").lower()
+    source = document.metadata.get("source", "").lower()
+    
+    authority_score = 0.6  # Base score
+    
+    # Primary source indicators (high authority)
+    primary_indicators = [
+        "children's homes regulations",
+        "quality standards",
+        "statutory guidance",
+        "guide to.*regulations",
+        "working together.*safeguard"
+    ]
+    
+    for indicator in primary_indicators:
+        if indicator in title or indicator in content[:500]:
+            authority_score = 1.0
+            break
+    
+    # Official source indicators (medium-high authority)
+    if authority_score < 1.0:
+        official_indicators = [
+            "gov.uk", "ofsted", "department for education",
+            "statutory", "regulation", "official guidance"
+        ]
+        
+        for indicator in official_indicators:
+            if indicator in source or indicator in title:
+                authority_score = max(authority_score, 0.8)
+                break
+    
+    # Policy/framework indicators (medium authority)
+    if authority_score < 0.8:
+        policy_indicators = [
+            "framework", "policy", "inspection", "safeguarding"
+        ]
+        
+        for indicator in policy_indicators:
+            if indicator in title:
+                authority_score = max(authority_score, 0.7)
+                break
+    
+    return authority_score
+
+
+def classify_content_type(document: Document) -> str:
+    """
+    Classify document content type for better retrieval targeting.
+    """
+    content = document.page_content.lower()
+    title = document.metadata.get("title", "").lower()
+    
+    # Check for quality standards primary source
+    if ("quality standard" in title and "children's home" in title) or \
+       ("guide to children's homes regulations" in title):
+        return "quality_standards_primary"
+    
+    # Check for regulatory mapping documents
+    if "regulation" in title and ("standard" in title or "quality" in title):
+        return "regulatory_mapping"
+    
+    # Check for inspection framework
+    if "inspection" in title and "framework" in title:
+        return "inspection_framework"
+    
+    # Check for safeguarding policy
+    if "safeguarding" in title or "child protection" in title:
+        return "safeguarding_policy"
+    
+    return "general_guidance"
+
+
+def extract_standards_and_regulations(content: str) -> dict:
+    """
+    Extract quality standards and regulation numbers mentioned in content.
+    """
+    import re
+    
+    # Enhanced patterns for quality standards
+    standards_patterns = [
+        r'(?:quality\s+)?standard\s*([1-9])',  # "standard 1", "quality standard 2"
+        r'qs\s*([1-9])',                       # "QS1", "QS 2"
+        r'(\d+)\s*quality\s*standards?',       # "9 quality standards"
+        r'standards?\s*([1-9])\s*[-–]\s*([1-9])', # "standards 1-9"
+    ]
+    
+    standards = []
+    for pattern in standards_patterns:
+        matches = re.findall(pattern, content.lower())
+        if pattern == r'(\d+)\s*quality\s*standards?':
+            # Handle "9 quality standards" case
+            for match in matches:
+                num_standards = int(match)
+                if 1 <= num_standards <= 9:
+                    standards.extend([f"Quality Standard {i}" for i in range(1, num_standards + 1)])
+        else:
+            standards.extend([f"Quality Standard {match}" for match in matches])
+    
+    # Enhanced patterns for regulation numbers
+    reg_patterns = [
+        r'regulation\s+(\d+)',
+        r'reg\s+(\d+)',
+        r'si\s+(\d{4}/\d+)',
+        r'statutory\s+instrument\s+(\d{4}/\d+)',
+        r'the\s+.*regulations?\s+(\d{4})'  # "The Children's Homes Regulations 2015"
+    ]
+    
+    regulations = []
+    for pattern in reg_patterns:
+        matches = re.findall(pattern, content.lower())
+        regulations.extend(matches)
+    
+    return {
+        "standards_covered": list(set(standards)),
+        "regulation_mappings": list(set(regulations))
+    }
+
+
 
 # =============================================================================
 # NEW: INCREMENTAL UPDATE TRACKING CLASSES
@@ -221,11 +346,43 @@ class DocumentTracker:
         """Update registry with file information and associated chunks."""
         file_info = self.get_file_info(file_path)
         if file_info['exists']:
-            self.registry[file_path] = {
-                **file_info,
-                'chunks': chunks_info,
-                'last_processed': datetime.now().isoformat()
-            }
+            # NEW: Include document classification info
+            try:
+                # Try to load document to get classification
+                path = Path(file_path)
+                if path.exists():
+                    doc_type = "unknown"
+                    authority_level = 0.6
+                    
+                    # Quick classification based on filename/path
+                    if "regulation" in file_path.lower():
+                        doc_type = "primary_regulation"
+                        authority_level = 1.0
+                    elif "guidance" in file_path.lower():
+                        doc_type = "official_guidance" 
+                        authority_level = 0.8
+                    
+                    self.registry[file_path] = {
+                        **file_info,
+                        'chunks': chunks_info,
+                        'document_type': doc_type,
+                        'authority_level': authority_level,
+                        'last_processed': datetime.now().isoformat()
+                    }
+                else:
+                    # For URLs, store basic info
+                    self.registry[file_path] = {
+                        **file_info,
+                        'chunks': chunks_info,
+                        'last_processed': datetime.now().isoformat()
+                    }
+            except Exception as e:
+                logger.warning(f"Could not enhance file record for {file_path}: {e}")
+                self.registry[file_path] = {
+                    **file_info,
+                    'chunks': chunks_info,
+                    'last_processed': datetime.now().isoformat()
+                }
     
     def get_deleted_files(self) -> List[str]:
         """Get list of files that were tracked but no longer exist."""
@@ -636,10 +793,11 @@ def is_quality_content(content: str) -> bool:
     return True
 
 def extract_metadata(document: Document, source_type: str) -> Dict[str, Any]:
-    """Extract rich metadata from documents for better retrieval."""
+    """Enhanced metadata extraction with authority and content classification."""
     content = document.page_content
     metadata = document.metadata.copy()
     
+    # Original metadata (preserve existing functionality)
     metadata.update({
         'content_length': len(content),
         'word_count': len(content.split()),
@@ -649,6 +807,7 @@ def extract_metadata(document: Document, source_type: str) -> Dict[str, Any]:
         'content_hash': calculate_content_hash(content)
     })
     
+    # Extract keywords (preserve existing)
     words = content.lower().split()
     word_freq = {}
     for word in words:
@@ -657,6 +816,22 @@ def extract_metadata(document: Document, source_type: str) -> Dict[str, Any]:
     
     top_keywords = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
     metadata['keywords'] = [word for word, _ in top_keywords]
+    
+    # NEW: Add authority and classification metadata
+    metadata.update({
+        'authority_level': detect_document_authority(document),
+        'content_classification': classify_content_type(document),
+        'is_primary_source': detect_document_authority(document) >= 0.9
+    })
+    
+    # NEW: Extract standards and regulations
+    standards_info = extract_standards_and_regulations(content)
+    metadata.update(standards_info)
+    
+    # NEW: Calculate completeness score
+    completeness_indicators = ['complete', 'comprehensive', 'full', 'entire', 'all']
+    completeness_count = sum(1 for indicator in completeness_indicators if indicator in content.lower())
+    metadata['completeness_score'] = min(completeness_count * 0.1 + 0.5, 1.0)
     
     return metadata
 
@@ -737,6 +912,7 @@ def load_pdf_from_url(url: str) -> List[Document]:
             doc.metadata = extract_metadata(doc, "web_pdf")
             doc.metadata["source"] = url
             doc.metadata["pdf_page"] = doc.metadata.get("page", 0)
+            doc.metadata["document_type"] = infer_document_type_from_content(doc)
             
             if is_quality_content(doc.page_content):
                 processed_docs.append(doc)
@@ -762,6 +938,41 @@ def load_pdf_from_url(url: str) -> List[Document]:
     except Exception as e:
         logger.error(f"✗ ERROR: Failed to process PDF {url}: {e}")
         return []
+
+def infer_document_type_from_content(document: Document) -> str:
+    """
+    Infer document type based on content patterns.
+    This helps with better document classification during ingestion.
+    """
+    title = document.metadata.get("title", "").lower()
+    content = document.page_content.lower()
+    source = document.metadata.get("source", "").lower()
+    
+    # Primary regulation documents
+    if any(pattern in title for pattern in [
+        "guide to children's homes regulations",
+        "children's homes regulations",
+        "quality standards"
+    ]):
+        return "primary_regulation"
+    
+    # Statutory guidance
+    if "statutory guidance" in title or "working together" in title:
+        return "statutory_guidance"
+    
+    # Inspection framework
+    if "inspection" in title and "framework" in title:
+        return "inspection_framework"
+    
+    # Official guidance from gov.uk
+    if "gov.uk" in source and "guidance" in title:
+        return "official_guidance"
+    
+    # Policy documents
+    if any(word in title for word in ["policy", "safeguarding", "keeping.*safe"]):
+        return "policy_document"
+    
+    return "general_guidance"
 
 def scrape_web_content(url: str) -> List[Document]:
     """Scrape text content from a web page with enhanced extraction."""
@@ -832,6 +1043,8 @@ def scrape_web_content(url: str) -> List[Document]:
             "title": title,
             "domain": url.split('/')[2] if len(url.split('/')) > 2 else ""
         })
+        # FIXED: Moved this line outside the update() call
+        doc.metadata["document_type"] = infer_document_type_from_content(doc)
         
         cache_data = {
             'page_content': doc.page_content,
@@ -920,6 +1133,7 @@ def create_semantic_chunks(documents: List[Document]) -> List[Document]:
                 if len(chunk.page_content.strip()) < MIN_CHUNK_SIZE:
                     continue
                 
+                # Original metadata (preserve existing)
                 chunk.metadata.update({
                     'chunk_id': chunk_id,
                     'chunk_index': i,
@@ -928,6 +1142,21 @@ def create_semantic_chunks(documents: List[Document]) -> List[Document]:
                     'chunk_length': len(chunk.page_content),
                     'chunk_words': len(chunk.page_content.split())
                 })
+                
+                # NEW: Inherit authority metadata from parent document
+                chunk.metadata.update({
+                    'authority_level': doc.metadata.get('authority_level', 0.6),
+                    'content_classification': doc.metadata.get('content_classification', 'general_guidance'),
+                    'is_primary_source': doc.metadata.get('is_primary_source', False),
+                    'completeness_score': doc.metadata.get('completeness_score', 0.5)
+                })
+                
+                # NEW: Check if this chunk contains standards/regulations info
+                chunk_standards_info = extract_standards_and_regulations(chunk.page_content)
+                if chunk_standards_info['standards_covered'] or chunk_standards_info['regulation_mappings']:
+                    chunk.metadata.update(chunk_standards_info)
+                    # Boost authority if chunk contains specific standards/regulations
+                    chunk.metadata['authority_level'] = min(chunk.metadata['authority_level'] + 0.1, 1.0)
                 
                 all_chunks.append(chunk)
                 chunk_id += 1
@@ -1342,8 +1571,8 @@ def create_dual_vector_databases(documents: List[Document], embedding_manager: E
             logger.info(f"✅ {provider.upper()} database created successfully!")
             logger.info(f"   📁 Path: {db_dir}")
             logger.info(f"   📊 Chunks: {len(chunks)}")
-            logger.info(f"   ⏱️  Time: {creation_time:.2f}s")
-            logger.info(f"   📐 Dimensions: {embedding_manager.model_info[provider]['actual_dimensions']}")
+            logger.info(f"   ⏱️ Time: {creation_time:.2f}s")
+            logger.info(f"   📏 Dimensions: {embedding_manager.model_info[provider]['actual_dimensions']}")
             
         except Exception as e:
             logger.error(f"❌ Failed to create {provider} database: {e}")
@@ -1353,7 +1582,13 @@ def create_dual_vector_databases(documents: List[Document], embedding_manager: E
                 "chunks_count": len(chunks)
             }
     
-    # Save combined statistics
+    # Calculate content type distribution
+    content_types = {}
+    for chunk in chunks:
+        content_type = chunk.metadata.get('content_classification', 'unknown')
+        content_types[content_type] = content_types.get(content_type, 0) + 1
+    
+    # FIXED: Corrected stats dictionary structure
     stats = {
         'total_documents': len(documents),
         'total_chunks': len(chunks),
@@ -1361,7 +1596,22 @@ def create_dual_vector_databases(documents: List[Document], embedding_manager: E
         'ingestion_date': datetime.now().isoformat(),
         'chunk_size': CHUNK_SIZE,
         'chunk_overlap': CHUNK_OVERLAP,
-        'smart_routing_config': SMART_ROUTING_CONFIG
+        'smart_routing_config': SMART_ROUTING_CONFIG,
+        'authority_distribution': {
+            'high_authority': len([c for c in chunks if c.metadata.get('authority_level', 0) >= 0.8]),
+            'medium_authority': len([c for c in chunks if 0.6 <= c.metadata.get('authority_level', 0) < 0.8]),
+            'low_authority': len([c for c in chunks if c.metadata.get('authority_level', 0) < 0.6])
+        },
+        'content_type_distribution': content_types,
+        'primary_sources_count': len([c for c in chunks if c.metadata.get('is_primary_source', False)]),
+        'standards_coverage': len(set(
+            std for chunk in chunks 
+            for std in chunk.metadata.get('standards_covered', [])
+        )),
+        'regulations_found': len(set(
+            reg for chunk in chunks 
+            for reg in chunk.metadata.get('regulation_mappings', [])
+        ))
     }
     
     stats_file = Path(METADATA_DIR) / "dual_ingestion_stats.json"
@@ -1369,6 +1619,70 @@ def create_dual_vector_databases(documents: List[Document], embedding_manager: E
         json.dump(stats, f, indent=2)
     
     return results
+
+def validate_authority_metadata(chunks: List[Document]) -> Dict[str, Any]:
+    """
+    Validate that authority metadata is properly assigned.
+    This helps debug retrieval issues.
+    """
+    validation_results = {
+        'total_chunks': len(chunks),
+        'chunks_with_authority': 0,
+        'primary_sources': 0,
+        'quality_standards_chunks': 0,
+        'regulation_mapping_chunks': 0,
+        'authority_distribution': {'high': 0, 'medium': 0, 'low': 0},
+        'sample_high_authority': [],
+        'issues_found': []
+    }
+    
+    for chunk in chunks:
+        authority_level = chunk.metadata.get('authority_level', 0)
+        is_primary = chunk.metadata.get('is_primary_source', False)
+        content_type = chunk.metadata.get('content_classification', '')
+        standards = chunk.metadata.get('standards_covered', [])
+        regulations = chunk.metadata.get('regulation_mappings', [])
+        
+        if authority_level > 0:
+            validation_results['chunks_with_authority'] += 1
+        
+        if is_primary:
+            validation_results['primary_sources'] += 1
+        
+        if content_type == 'quality_standards_primary':
+            validation_results['quality_standards_chunks'] += 1
+        
+        if regulations:
+            validation_results['regulation_mapping_chunks'] += 1
+        
+        # Classify authority level
+        if authority_level >= 0.8:
+            validation_results['authority_distribution']['high'] += 1
+            if len(validation_results['sample_high_authority']) < 3:
+                validation_results['sample_high_authority'].append({
+                    'title': chunk.metadata.get('title', 'Unknown')[:60],
+                    'authority_level': authority_level,
+                    'content_type': content_type,
+                    'standards_count': len(standards)
+                })
+        elif authority_level >= 0.6:
+            validation_results['authority_distribution']['medium'] += 1
+        else:
+            validation_results['authority_distribution']['low'] += 1
+    
+    # Check for potential issues
+    if validation_results['quality_standards_chunks'] == 0:
+        validation_results['issues_found'].append("No quality standards primary documents found")
+    
+    if validation_results['primary_sources'] == 0:
+        validation_results['issues_found'].append("No primary sources detected")
+    
+    high_authority_ratio = validation_results['authority_distribution']['high'] / len(chunks)
+    if high_authority_ratio < 0.05:  # Less than 5% high authority
+        validation_results['issues_found'].append(f"Very few high-authority chunks ({high_authority_ratio:.1%})")
+    
+    return validation_results
+
 
 # =============================================================================
 # MAIN EXECUTION (enhanced with incremental update support)
@@ -1411,6 +1725,9 @@ def main(incremental: bool = True, force_rebuild: bool = False) -> None:
         # Initialize tracking components
         document_tracker = DocumentTracker()
         index_manager = IndexManager(embedding_manager)
+        
+        # NEW: Variable to store chunks for validation
+        chunks = None
         
         if incremental and not force_rebuild:
             # Incremental update mode
@@ -1457,6 +1774,10 @@ def main(incremental: bool = True, force_rebuild: bool = False) -> None:
             processing_time = time.time() - start_time
             changes = {"new_files": [], "modified_files": [], "deleted_files": []}
             
+            # NEW: Get chunks for validation
+            chunks = create_semantic_chunks(all_documents)
+            chunks = deduplicate_chunks(chunks)
+            
             # Update document tracker for full rebuild
             for doc in all_documents:
                 source = doc.metadata.get('source') or doc.metadata.get('file_path', 'unknown')
@@ -1464,6 +1785,29 @@ def main(incremental: bool = True, force_rebuild: bool = False) -> None:
                 document_tracker.update_file_record(source, chunks_info)
             
             document_tracker.save_registry()
+        
+        # NEW: Validate authority metadata assignment
+        if chunks and len(chunks) > 0:
+            logger.info("\nValidating authority metadata assignment...")
+            validation = validate_authority_metadata(chunks)
+            
+            print(f"\nAUTHORITY METADATA VALIDATION:")
+            print(f"   Total chunks: {validation['total_chunks']}")
+            print(f"   Primary sources: {validation['primary_sources']}")
+            print(f"   Quality standards chunks: {validation['quality_standards_chunks']}")
+            print(f"   High authority: {validation['authority_distribution']['high']}")
+            print(f"   Medium authority: {validation['authority_distribution']['medium']}")
+            print(f"   Low authority: {validation['authority_distribution']['low']}")
+            
+            if validation['sample_high_authority']:
+                print(f"\nSample high-authority chunks:")
+                for i, sample in enumerate(validation['sample_high_authority'], 1):
+                    print(f"   {i}. {sample['title']} (authority: {sample['authority_level']:.3f})")
+            
+            if validation['issues_found']:
+                print(f"\nPotential issues found:")
+                for issue in validation['issues_found']:
+                    print(f"   - {issue}")
         
         # Display final results
         print("\n" + "=" * 80)
@@ -1475,12 +1819,12 @@ def main(incremental: bool = True, force_rebuild: bool = False) -> None:
         print(f"📊 Processing time: {processing_time:.2f} seconds")
         
         if incremental and changes:
-            print(f"📝 Changes processed:")
+            print(f"🔍 Changes processed:")
             print(f"   • New files: {len(changes['new_files'])}")
             print(f"   • Modified files: {len(changes['modified_files'])}")
             print(f"   • Deleted files: {len(changes['deleted_files'])}")
         
-        print("\n🗂️  DATABASE SUMMARY:")
+        print("\n🗂️ DATABASE SUMMARY:")
         success_count = 0
         for provider, result in results.items():
             if result.get("status") == "success":
@@ -1510,6 +1854,27 @@ def main(incremental: bool = True, force_rebuild: bool = False) -> None:
         raise
 
 
+# =============================================================================
+# ADDITIONAL: Test function to validate authority detection
+# =============================================================================
+
+def test_authority_detection():
+    """Test function to validate authority detection is working."""
+    from langchain.docstore.document import Document
+    
+    test_doc = Document(
+        page_content="The Children's Homes (England) Regulations 2015 set out 9 quality standards for children's homes...",
+        metadata={"title": "Guide to Children's Homes Regulations including Quality Standards"}
+    )
+    
+    enhanced_metadata = extract_metadata(test_doc, "test")
+    print(f"Authority Level: {enhanced_metadata.get('authority_level')}")
+    print(f"Content Type: {enhanced_metadata.get('content_classification')}")
+    print(f"Is Primary: {enhanced_metadata.get('is_primary_source')}")
+    print(f"Standards: {enhanced_metadata.get('standards_covered')}")
+    print(f"Regulations: {enhanced_metadata.get('regulation_mappings')}")
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -1518,8 +1883,15 @@ if __name__ == "__main__":
                        help="Disable incremental updates (full rebuild)")
     parser.add_argument("--force-rebuild", action="store_true",
                        help="Force complete rebuild of all indexes")
+    parser.add_argument("--test-authority", action="store_true",
+                       help="Test authority detection")
     
     args = parser.parse_args()
+    
+    # Test authority detection
+    if args.test_authority:
+        test_authority_detection()
+        exit(0)
     
     # Run with appropriate mode
     if args.force_rebuild:
