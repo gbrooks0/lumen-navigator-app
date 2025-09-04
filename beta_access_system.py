@@ -26,7 +26,30 @@ class BetaAccessManager:
         
         # Initialize database
         self._init_database()
+
+    def get_role_based_limit(self, user_role: str) -> int:
+        """Get daily query limit based on user role"""
+        ROLE_LIMITS = {
+            'manager': 25,
+            'safeguarding': 30,
+            'inspector': 20,
+            'standard': 15
+        }
+        return ROLE_LIMITS.get(user_role, 15)
     
+    def determine_user_role(self, user_info: Dict[str, Any]) -> str:
+        """Determine user role from Auth0 app_metadata only"""
+        # Get role from Auth0 app_metadata
+        app_metadata = user_info.get('app_metadata', {})
+        user_role = app_metadata.get('user_role')
+        
+        if user_role:
+            return user_role
+        
+        # If no role found, return standard as fallback
+        # (This should rarely happen with the role collection gate in place)
+        return 'standard'
+
     def _get_config(self, key: str, default: str = None) -> str:
         """Get configuration from environment or Streamlit secrets"""
         # Try environment variables first
@@ -50,50 +73,64 @@ class BetaAccessManager:
         return default
     
     def _init_database(self):
-        """Initialize SQLite database for beta management"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Beta users table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS beta_users (
-                    user_id TEXT PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL,
-                    name TEXT,
-                    status TEXT DEFAULT 'waiting',
-                    signup_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    approved_date TIMESTAMP,
-                    waiting_list_position INTEGER,
-                    total_queries INTEGER DEFAULT 0,
-                    metadata TEXT
-                )
-            """)
-            
-            # Daily usage tracking
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS daily_usage (
-                    user_id TEXT,
-                    usage_date DATE,
-                    query_count INTEGER DEFAULT 0,
-                    PRIMARY KEY (user_id, usage_date),
-                    FOREIGN KEY (user_id) REFERENCES beta_users (user_id)
-                )
-            """)
-            
-            # Waiting list table for additional tracking
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS waiting_list (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    email TEXT,
-                    name TEXT,
-                    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    notified BOOLEAN DEFAULT FALSE,
-                    FOREIGN KEY (user_id) REFERENCES beta_users (user_id)
-                )
-            """)
-            
-            conn.commit()
+        """Initialize SQLite database with all necessary tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Beta users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS beta_users (
+                user_id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                name TEXT,
+                status TEXT DEFAULT 'waiting',
+                signup_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                approved_date TIMESTAMP,
+                waiting_list_position INTEGER,
+                total_queries INTEGER DEFAULT 0,
+                metadata TEXT
+            )
+        """)
+        
+        # Daily usage tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                user_id TEXT,
+                usage_date DATE,
+                query_count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, usage_date),
+                FOREIGN KEY (user_id) REFERENCES beta_users (user_id)
+            )
+        """)
+        
+        # Waiting list table for additional tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS waiting_list (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                email TEXT,
+                name TEXT,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                notified BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (user_id) REFERENCES beta_users (user_id)
+            )
+        """)
+        
+        # Emergency overrides table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS emergency_overrides (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT,
+                override_date DATE,
+                justification TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                query_id TEXT
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
     
     def _get_management_token(self) -> Optional[str]:
         """Get Auth0 Management API token"""
@@ -187,6 +224,10 @@ class BetaAccessManager:
             approved_count = cursor.fetchone()[0]
             
             if approved_count < self.beta_limit:
+                # Determine role-based limit for new user
+                user_role = self.determine_user_role(user_info)
+                role_based_limit = self.get_role_based_limit(user_role)
+                
                 # Approve immediately - first come, first serve
                 cursor.execute("""
                     INSERT INTO beta_users (user_id, email, name, status, approved_date)
@@ -196,13 +237,14 @@ class BetaAccessManager:
                 # Update Auth0 metadata
                 self._update_user_metadata(user_id, {
                     'beta_status': 'approved',
-                    'daily_query_limit': self.daily_query_limit,
+                    'user_role': user_role,
+                    'daily_query_limit': role_based_limit,
                     'approved_date': datetime.now().isoformat()
                 })
                 
                 conn.commit()
                 return "approved", {
-                    "message": f"Welcome to the beta! You have {self.daily_query_limit} queries per day.",
+                    "message": f"Welcome to the beta! You have {role_based_limit} queries per day as a {user_role} user.",
                     "beta_number": approved_count + 1
                 }
             
@@ -272,6 +314,10 @@ class BetaAccessManager:
                 'status': 'error',
                 'message': 'Unable to identify user'
             }
+
+        # Determine user role and get role-based limit
+        user_role = self.determine_user_role(user_info)
+        role_based_limit = self.get_role_based_limit(user_role)
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -292,12 +338,14 @@ class BetaAccessManager:
                 if status == "approved":
                     return {
                         'access_granted': True,
-                        'user_type': 'beta_user',
+                        'user_type': 'beta_user', 
                         'status': 'approved',
                         'message': info['message'],
-                        'queries_remaining': self.daily_query_limit,
+                        'queries_remaining': role_based_limit,
                         'queries_used_today': 0,
                         'beta_number': info['beta_number'],
+                        'user_role': user_role,
+                        'daily_limit': role_based_limit,
                         'is_new_user': True
                     }
                 else:
@@ -330,8 +378,9 @@ class BetaAccessManager:
             
             usage_data = cursor.fetchone()
             queries_used_today = usage_data[0] if usage_data else 0
-            queries_remaining = max(0, self.daily_query_limit - queries_used_today)
-            
+            queries_remaining = max(0, role_based_limit - queries_used_today)
+
+
             if queries_remaining <= 0:
                 # Calculate reset time
                 tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time())
@@ -345,7 +394,9 @@ class BetaAccessManager:
                     'queries_remaining': 0,
                     'queries_used_today': queries_used_today,
                     'reset_time': tomorrow.strftime('%H:%M'),
-                    'daily_limit': self.daily_query_limit
+                    'daily_limit': role_based_limit,
+                    'user_role': user_role,
+                    'emergency_override_available': True
                 }
             
             return {
@@ -355,9 +406,11 @@ class BetaAccessManager:
                 'message': f"Beta access active - {queries_remaining} queries remaining today",
                 'queries_remaining': queries_remaining,
                 'queries_used_today': queries_used_today,
-                'daily_limit': self.daily_query_limit,
+                'daily_limit': role_based_limit,
+                'user_role': user_role,
                 'total_queries': total_queries,
-                'approved_date': approved_date
+                'approved_date': approved_date,
+                'emergency_override_available': queries_remaining <= 2
             }
     
     def log_query_usage(self, user_info: Dict[str, Any]) -> bool:
@@ -516,3 +569,96 @@ class BetaAccessManager:
             conn.commit()
         
         return promoted_users
+
+    def use_emergency_override(self, user_info: Dict[str, Any], justification: str, query_id: str = None) -> bool:
+        """Use emergency override with justification logging"""
+        user_id = user_info.get('sub')
+        if not user_id:
+            return False
+        
+        # Generate session ID (works in both Streamlit and testing environments)
+        try:
+            if hasattr(self, 'generate_session_id'):
+                session_id = self.generate_session_id()
+            else:
+                import uuid
+                session_id = str(uuid.uuid4())
+        except:
+            import uuid
+            session_id = str(uuid.uuid4())
+        today = date.today()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Ensure emergency_overrides table exists
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS emergency_overrides (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT,
+                override_date DATE,
+                justification TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                query_id TEXT
+            )
+            ''')
+            
+            # Check if already used 3 overrides today
+            cursor.execute("""
+                SELECT COUNT(*) FROM emergency_overrides 
+                WHERE user_id = ? AND override_date = ?
+            """, (user_id, today))
+            
+            overrides_used = cursor.fetchone()[0]
+            
+            if overrides_used >= 3:
+                return False
+            
+            # Log the override
+            override_id = str(uuid.uuid4())
+            cursor.execute("""
+                INSERT INTO emergency_overrides (id, user_id, session_id, override_date, justification, query_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (override_id, user_id, session_id, today, justification, query_id))
+            
+            conn.commit()
+            return True
+    
+    def check_emergency_override_available(self, user_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Check if emergency override is available"""
+        user_id = user_info.get('sub')
+        if not user_id:
+            return {'available': False, 'remaining': 0}
+        
+        today = date.today()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # Ensure emergency_overrides table exists
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS emergency_overrides (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT,
+                override_date DATE,
+                justification TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                query_id TEXT
+            )
+            ''')
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM emergency_overrides 
+                WHERE user_id = ? AND override_date = ?
+            """, (user_id, today))
+            
+            overrides_used = cursor.fetchone()[0]
+            remaining = max(0, 3 - overrides_used)
+            
+            return {
+                'available': remaining > 0,
+                'remaining': remaining,
+                'used_today': overrides_used
+            }

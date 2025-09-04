@@ -52,10 +52,28 @@ class PerformanceTracker:
             performance_mode TEXT,
             rag_system_version TEXT,
             error_occurred BOOLEAN,
-            error_message TEXT
+            error_message TEXT,
+            query_complexity TEXT,
+            is_regulatory BOOLEAN,
+            user_role TEXT,
+            is_emergency_override BOOLEAN
         )
         ''')
-        
+
+        # Emergency overrides table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS emergency_overrides (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            session_id TEXT,
+            override_date DATE,
+            justification TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            query_id TEXT
+        )
+        ''')
+
+
         # User feedback table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_feedback (
@@ -160,7 +178,44 @@ class PerformanceTracker:
                 return category
         
         return 'general'
+
+    def classify_query_complexity(self, query_text: str) -> str:
+        """Classify query complexity for cost optimization"""
+        query_lower = query_text.lower()
+        word_count = len(query_text.split())
+        
+        # Complex indicators
+        complex_indicators = [
+            'analyze', 'compare', 'evaluate', 'assess', 'review',
+            'compliance gaps', 'action plan', 'recommendations',
+            'summarize', 'breakdown', 'detailed analysis'
+        ]
+        
+        # Simple indicators
+        simple_indicators = [
+            'what is', 'define', 'who is', 'when did', 'where is',
+            'list', 'show me', 'find'
+        ]
+        
+        if word_count > 50 or any(indicator in query_lower for indicator in complex_indicators):
+            return 'complex'
+        elif any(indicator in query_lower for indicator in simple_indicators) and word_count < 20:
+            return 'simple'
+        else:
+            return 'moderate'
     
+    def is_regulatory_query(self, query_text: str) -> bool:
+        """Determine if query involves regulatory/compliance content"""
+        query_lower = query_text.lower()
+        regulatory_keywords = [
+            'ofsted', 'inspection', 'regulation', 'compliance',
+            'children act', 'care standards', 'safeguarding policy',
+            'data protection', 'gdpr', 'incident report',
+            'statutory', 'legal requirement', 'policy'
+        ]
+        
+        return any(keyword in query_lower for keyword in regulatory_keywords)
+
     def log_query(self, 
                   query_text: str, 
                   response_text: str, 
@@ -168,7 +223,9 @@ class PerformanceTracker:
                   sources: List[Dict] = None,
                   attachments: List = None,
                   performance_mode: str = "balanced",
-                  error_info: Dict = None) -> str:
+                  error_info: Dict = None,
+                  user_info: Dict = None,
+                  is_emergency_override: bool = False) -> str:
         """Log a query and response"""
         
         query_id = str(uuid.uuid4())
@@ -188,6 +245,13 @@ class PerformanceTracker:
         
         # Classify query
         query_category = self.classify_query(query_text)
+        query_complexity = self.classify_query_complexity(query_text)
+        is_regulatory = self.is_regulatory_query(query_text)
+        
+        # Get user role from user_info
+        user_role = 'unknown'
+        if user_info:
+            user_role = user_info.get('app_metadata', {}).get('user_role', 'standard')
         
         # Error handling
         error_occurred = error_info is not None
@@ -201,13 +265,15 @@ class PerformanceTracker:
         (id, session_id, user_id, timestamp, query_text, query_length, query_category,
          has_attachments, attachment_count, attachment_types, response_text, response_length,
          response_time_seconds, sources_count, sources_list, performance_mode, 
-         rag_system_version, error_occurred, error_message)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         rag_system_version, error_occurred, error_message, query_complexity, 
+         is_regulatory, user_role, is_emergency_override)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             query_id, session_id, user_id, timestamp, query_text, len(query_text),
             query_category, has_attachments, attachment_count, attachment_types,
             response_text, len(response_text), response_time, sources_count, sources_list,
-            performance_mode, "v1.0", error_occurred, error_message
+            performance_mode, "v1.0", error_occurred, error_message, query_complexity,
+            is_regulatory, user_role, is_emergency_override
         ))
         
         conn.commit()

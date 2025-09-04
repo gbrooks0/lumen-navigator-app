@@ -13,6 +13,8 @@ from typing import Dict, Any, Optional, List
 from performance_tracker import PerformanceTracker, show_feedback_widget, show_analytics_dashboard
 from beta_access_system import BetaAccessManager
 from beta_ui_components import show_beta_access_gate, show_beta_admin_panel, track_beta_query_usage
+from beta_access_system import BetaAccessManager
+import pandas as pd
 
 # STREAMLINED AUTH0 IMPORT
 from streamlined_auth0 import StreamlitAuth0
@@ -589,7 +591,23 @@ def show_enhanced_full_interface():
     with col2:
         if st.button("🧠 Get Expert AI Guidance", type="primary", use_container_width=True, key="main_guidance_button_single"):
             if user_question.strip() or uploaded_files_all:
-                process_enhanced_request(user_question, uploaded_files, uploaded_images)
+                # Check beta access before processing
+                beta_manager = BetaAccessManager()
+                user_info = st.session_state.get('user_info', {})
+                access_check = beta_manager.check_user_access(user_info)
+                
+                if access_check['access_granted']:
+                    # Clear any previous emergency override state
+                    if 'used_emergency_override' in st.session_state:
+                        del st.session_state.used_emergency_override
+                    
+                    process_enhanced_request(user_question, uploaded_files, uploaded_images)
+                elif access_check['status'] == 'limit_reached':
+                    # Show emergency override option
+                    if show_emergency_override_interface(access_check):
+                        process_enhanced_request(user_question, uploaded_files, uploaded_images)
+                else:
+                    st.error(f"Access denied: {access_check.get('message', 'Unknown error')}")
             else:
                 st.warning("⚠️ Please enter a question or upload files for analysis")
 
@@ -656,7 +674,9 @@ def process_enhanced_request(question, uploaded_files=None, uploaded_images=None
                     sources=result.get("sources", []),
                     attachments={"documents": uploaded_files, "images": uploaded_images},
                     performance_mode=st.session_state.get('performance_mode', 'balanced'),
-                    error_info=None
+                    error_info=None,
+                    user_info=st.session_state.get('user_info', {}),
+                    is_emergency_override=st.session_state.get('used_emergency_override', False)
                 )
                 
             else:
@@ -802,6 +822,62 @@ def show_enhanced_result_display():
             
             st.info("📧 Sharing functionality - contact your system administrator for email integration setup")
 
+def show_emergency_override_interface(access_info):
+    """Show emergency override interface when user hits daily limit"""
+    
+    if not access_info.get('emergency_override_available', False):
+        return False
+    
+    st.warning("Daily query limit reached. Emergency override available for urgent safeguarding situations.")
+    
+    with st.expander("🚨 Emergency Override (Urgent Safeguarding Only)", expanded=False):
+        st.markdown("""
+        **Emergency override is for:**
+        - Immediate safeguarding concerns
+        - Crisis situations requiring urgent guidance
+        - Child protection emergencies
+        
+        **Not for:**
+        - General queries that can wait until tomorrow
+        - Training or development questions
+        - Non-urgent policy clarifications
+        """)
+        
+        justification = st.text_area(
+            "Justification for emergency access:",
+            placeholder="Briefly describe the urgent safeguarding situation requiring immediate guidance...",
+            help="This will be logged for audit purposes"
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🚨 Use Emergency Override", type="primary"):
+                if justification and len(justification.strip()) > 20:
+                    # Initialize beta manager
+                    beta_manager = BetaAccessManager()
+                    user_info = st.session_state.get('user_info', {})
+                    
+                    if beta_manager.use_emergency_override(user_info, justification):
+                        st.session_state.used_emergency_override = True
+                        st.success("Emergency override activated. You may now submit your query.")
+                        st.rerun()
+                    else:
+                        st.error("Emergency override failed. You may have exceeded daily emergency limits (3 per day).")
+                else:
+                    st.error("Please provide a detailed justification (minimum 20 characters)")
+        
+        with col2:
+            if st.button("Cancel"):
+                st.info("Emergency override cancelled. Your query limit will reset tomorrow.")
+        
+        # Show remaining emergency overrides
+        override_info = beta_manager.check_emergency_override_available(st.session_state.get('user_info', {}))
+        if override_info['available']:
+            st.info(f"Emergency overrides remaining today: {override_info['remaining']}/3")
+    
+    return False
+
 def show_enhanced_sidebar():
     """Enhanced sidebar with system status, settings, and admin-only analytics"""
     with st.sidebar:
@@ -901,38 +977,14 @@ def show_enhanced_sidebar():
             col1, col2 = st.columns(2)
             
             with col1:
-                if st.button("📈 Analytics", use_container_width=True):
+                if st.button("Analytics", use_container_width=True):
                     st.session_state.show_analytics = True
                     st.rerun()
-            
-            with col2:
-                if st.button("🧪 Beta Admin", use_container_width=True):
-                    st.session_state.show_beta_admin = True
-                    st.rerun()
 
-            if st.button("🔍 Test Beta System", use_container_width=True):
-                st.write("### 🧪 Beta System Integration Test")
-                
-                try:
-                    # Test database creation
-                    beta_manager = BetaAccessManager()
-                    st.success("✅ Database initialized successfully")
-                    
-                    # Test admin dashboard data
-                    dashboard_data = beta_manager.get_admin_dashboard_data()
-                    st.success("✅ Admin dashboard data accessible")
-                    st.write("**Dashboard Data:**")
-                    st.json(dashboard_data)
-                    
-                    # Test user access check (with current user)
-                    user_info = st.session_state.get('user_info', {})
-                    access_info = beta_manager.check_user_access(user_info)
-                    st.success("✅ User access check working")
-                    st.write("**Current User Access:**")
-                    st.json(access_info)
-                    
-                except Exception as e:
-                    st.error(f"❌ Integration test failed: {e}")    
+            with col2:
+                if st.button("Beta Users", use_container_width=True):
+                    st.session_state.show_beta_admin = True
+                    st.rerun()  
             
             # Quick stats for admin
             try:
@@ -1058,6 +1110,272 @@ def test_beta_system_integration():
         st.error(f"❌ Integration test failed: {e}")
         return False
 
+def show_beta_access_gate(user_info):
+    """Show beta access control gate - returns (access_granted, access_info)"""
+    try:
+        beta_manager = BetaAccessManager()
+        access_info = beta_manager.check_user_access(user_info)
+        
+        if access_info['access_granted']:
+            # Show access status in sidebar if approved
+            if access_info.get('user_type') == 'beta_user':
+                with st.sidebar:
+                    st.success("✅ Beta Access Active")
+                    st.write(f"**Role:** {access_info.get('user_role', 'standard').title()}")
+                    st.write(f"**Queries remaining:** {access_info['queries_remaining']}")
+                    st.write(f"**Daily limit:** {access_info['daily_limit']}")
+            
+            return True, access_info
+        
+        else:
+            # Show beta blocking page
+            st.markdown("""
+            <div class="hero-gradient">
+                <div class="hero-title">🔐 Beta Access Required</div>
+                <div class="hero-subtitle">Lumen Navigator is currently in private beta testing</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if access_info['status'] == 'waiting':
+                st.info(f"📋 {access_info['message']}")
+                
+                st.markdown("""
+                ### 🚀 What You'll Get in Beta:
+                - **AI-powered guidance** for children's home management
+                - **Ofsted report analysis** with improvement pathways  
+                - **Safeguarding framework** support and guidance
+                - **Policy compliance** checking and recommendations
+                - **Direct feedback channel** to shape the final product
+                """)
+                
+                st.markdown("""
+                ### ⏰ Expected Timeline:
+                - **Current phase:** Closed beta with 20 selected homes
+                - **Next phase:** Extended beta (additional users)
+                - **Full launch:** Q2 2025
+                """)
+                
+            elif access_info['status'] == 'limit_reached':
+                st.warning(f"📊 {access_info['message']}")
+                
+                # Show emergency override option
+                show_emergency_override_interface(access_info)
+                
+            else:
+                st.error(f"❌ {access_info.get('message', 'Access denied')}")
+            
+            # Contact information
+            st.markdown("---")
+            st.markdown("""
+            ### 📞 Questions about Beta Access?
+            **Contact:** gbrooks@lumenwayhomes.org.uk  
+            **Subject:** Lumen Navigator Beta Access Request
+            """)
+            
+            return False, access_info
+    
+    except Exception as e:
+        st.error(f"Beta access system error: {e}")
+        return False, {}
+
+def track_beta_query_usage(user_info):
+    """Track that a query was used"""
+    try:
+        beta_manager = BetaAccessManager()
+        beta_manager.log_query_usage(user_info)
+    except Exception as e:
+        st.warning(f"Query tracking failed: {e}")
+
+def collect_user_role_if_needed(user_info):
+    """Collect user role if not already set - blocking until completed"""
+    
+    # Check if user is admin first - admins bypass role selection
+    email = user_info.get('email', '')
+    admin_emails = [
+        'garybrooks0@gmail.com', 
+        'gbrooks@lumenwayhomes.org.uk',
+        'analytics@lumenwayhomes.org.uk'
+    ]
+    
+    is_admin = (email.endswith('@lumenwayhomes.org.uk') or 
+               email in admin_emails or 
+               os.getenv('LUMEN_ADMIN_MODE') == 'true')
+    
+    if is_admin:
+        return True  # Admin users bypass role selection
+    
+    # Check if user already has a role assigned
+    beta_manager = BetaAccessManager()
+    
+    # Check Auth0 metadata for existing role
+    app_metadata = user_info.get('app_metadata', {})
+    existing_role = app_metadata.get('user_role')
+    
+    if existing_role:
+        return True  # Role already set, continue
+    
+    # Show role selection interface
+    st.markdown("""
+    <div class="hero-gradient">
+        <div class="hero-title">Welcome to Lumen Navigator Beta</div>
+        <div class="hero-subtitle">Please select your role to get started</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("### Select Your Role")
+    st.write("Your role determines your daily query limit and system access level.")
+    
+    role_options = {
+        'manager': {
+            'title': 'Manager/Director',
+            'description': 'Home manager, deputy manager, registered manager, or senior leadership role'
+        },
+        'safeguarding': {
+            'title': 'Safeguarding Officer',
+            'description': 'Designated safeguarding lead, child protection specialist, or welfare officer'
+        },
+        'inspector': {
+            'title': 'Inspector/Compliance',
+            'description': 'Regulatory inspector, compliance officer, quality assurance, or audit role'
+        },
+        'standard': {
+            'title': 'Care Staff',
+            'description': 'Residential care worker, support worker, or frontline care staff'
+        }
+    }
+    
+    # Display role options as cards
+    selected_role = None
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button(
+            f"👔 {role_options['manager']['title']}",
+            help=role_options['manager']['description'],
+            use_container_width=True
+        ):
+            selected_role = 'manager'
+        
+        if st.button(
+            f"🛡️ {role_options['safeguarding']['title']}", 
+            help=role_options['safeguarding']['description'],
+            use_container_width=True
+        ):
+            selected_role = 'safeguarding'
+    
+    with col2:
+        if st.button(
+            f"📋 {role_options['inspector']['title']}",
+            help=role_options['inspector']['description'], 
+            use_container_width=True
+        ):
+            selected_role = 'inspector'
+        
+        if st.button(
+            f"👥 {role_options['standard']['title']}",
+            help=role_options['standard']['description'],
+            use_container_width=True
+        ):
+            selected_role = 'standard'
+    
+    # Process role selection
+    if selected_role:
+        with st.spinner("Setting up your account..."):
+            success = beta_manager._update_user_metadata(user_info['sub'], {
+                'user_role': selected_role
+            })
+            
+            if success:
+                st.success(f"Role set to {role_options[selected_role]['title']}! Redirecting...")
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.error("Failed to update your role. Please try again or contact support.")
+    
+    st.markdown("---")
+    st.info("You must select a role before accessing Lumen Navigator. This helps us provide appropriate query limits and relevant content.")
+    
+    return False  # Block access until role is selected
+
+
+def show_beta_admin_dashboard():
+    """Show beta user management dashboard - matches analytics design"""
+    st.title("Beta User Management")
+    
+    try:
+        beta_manager = BetaAccessManager()
+        dashboard_data = beta_manager.get_admin_dashboard_data()
+        
+        # Overview metrics (similar to analytics)
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Beta Users",
+                f"{dashboard_data['beta_users']['approved']}/{dashboard_data['beta_users']['limit']}",
+                delta=f"{dashboard_data['beta_users']['spots_remaining']} spots remaining"
+            )
+        
+        with col2:
+            st.metric(
+                "Active Today",
+                dashboard_data['daily_stats']['active_users'],
+                delta=f"{dashboard_data['daily_stats']['total_queries']} queries"
+            )
+        
+        with col3:
+            st.metric(
+                "Avg Queries/User",
+                f"{dashboard_data['daily_stats']['avg_queries_per_user']:.1f}",
+                delta=f"Max: {dashboard_data['usage_trends']['max_daily_queries']}"
+            )
+        
+        with col4:
+            st.metric(
+                "Daily Limit",
+                dashboard_data['usage_trends']['daily_limit'],
+                delta=f"Avg: {dashboard_data['usage_trends']['avg_daily_queries']}"
+            )
+        
+        # Recent signups table
+        st.subheader("Recent Signups")
+        if dashboard_data['recent_signups']:
+            import pandas as pd
+            signup_df = pd.DataFrame(dashboard_data['recent_signups'])
+            st.dataframe(signup_df, use_container_width=True)
+        else:
+            st.info("No recent signups")
+        
+        # Admin actions
+        st.subheader("Admin Actions")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("Promote from Waiting List", type="primary"):
+                promoted = beta_manager.promote_waiting_list_users(1)
+                if promoted:
+                    user = promoted[0]
+                    st.success(f"Promoted {user['email']} from position #{user['former_position']}")
+                    st.rerun()
+                else:
+                    st.warning("No users to promote or no available spots")
+        
+        with col2:
+            if st.button("Refresh Data"):
+                st.rerun()
+        
+        with col3:
+            if st.button("View Analytics"):
+                st.session_state.show_analytics = True
+                st.session_state.show_beta_admin = False
+                st.rerun()
+        
+    except Exception as e:
+        st.error(f"Beta admin dashboard error: {e}")
+        st.code(str(e))
+
 # ===== ADD TO MAIN APP FLOW =====
 
 
@@ -1082,6 +1400,11 @@ def main():
     if user_info is None:
         st.error("Unable to retrieve user information. Please try logging in again.")
         st.stop()
+
+    # === NEW: ROLE COLLECTION (before beta access) ===
+    role_assigned = collect_user_role_if_needed(user_info)
+    if not role_assigned:
+        st.stop()  # Block until role is selected
 
     # === NEW: BETA ACCESS GATE ===
     access_granted, access_info = show_beta_access_gate(user_info)
@@ -1136,6 +1459,16 @@ def main():
             st.rerun()
         
         return  # Don't show main app content when analytics is active
+
+    # Check if beta admin should be shown
+    if st.session_state.get('show_beta_admin', False):
+        show_beta_admin_dashboard()
+        
+        if st.button("← Back to Main App"):
+            st.session_state.show_beta_admin = False
+            st.rerun()
+        
+        return  # Don't show main app content when beta admin is active
     
     # Track current page view (keep existing)
     if st.session_state.ui_state.get('current_result'):
