@@ -1261,6 +1261,33 @@ class SmartResponseDetector:
             r'\bbest\s+practice\s+(?:guidance|standards?)\b',
         ]
 
+        # Children's home document prioritization patterns
+        self.children_home_tier1_patterns = [
+            r'\bquality\s+standards?\b',
+            r'\bchildren\'?s\s+homes?\s+regulations?\s+2015\b',
+            r'\bsccif\s+framework\b',
+            r'\bstatutory\s+guidance\b',
+            r'\bannex\s+a\b.*\bsccif\b',
+            r'\bguide\s+to.*regulations?\b'
+        ]
+
+        self.children_home_tier2_patterns = [
+            r'\bnational\s+minimum\s+standards?\b',
+            r'\bofsted\s+guidance\b',
+            r'\binspection\s+guidance\b',
+            r'\binspection\s+framework\b'
+        ]
+
+        self.children_home_context_patterns = [
+            r'\bchildren\'?s\s+homes?\b',
+            r'\bresidential\s+care\b',
+            r'\bregulation\s+44\b',
+            r'\blooked\s+after\s+children\b',
+            r'\bcare\s+homes?\b',
+            r'\bannex\s+a\b.*\bsccif\b',
+            r'\bsccif\b.*\bannex\s+a\b'
+                ]
+
     def _is_ofsted_analysis_with_context(self, question: str, is_file_analysis: bool = False) -> bool:
         """
         SAFE Ofsted detection - only triggers when files are involved OR explicit document references
@@ -1373,6 +1400,30 @@ class SmartResponseDetector:
         
         return None
     
+    def detect_children_home_context(self, question: str) -> Dict[str, Any]:
+        """Detect if query needs children's home document prioritization"""
+        question_lower = question.lower()
+        
+        # Check for children's home context using existing pattern matching approach
+        has_context = any(re.search(pattern, question_lower, re.IGNORECASE) 
+                         for pattern in self.children_home_context_patterns)
+        
+        if not has_context:
+            return {'needs_prioritization': False}
+        
+        # Check tier patterns using same approach as other pattern lists
+        needs_tier_1 = any(re.search(pattern, question_lower, re.IGNORECASE)
+                          for pattern in self.children_home_tier1_patterns)
+        needs_tier_2 = any(re.search(pattern, question_lower, re.IGNORECASE)
+                          for pattern in self.children_home_tier2_patterns)
+        
+        return {
+            'needs_prioritization': True,
+            'force_tier_1': needs_tier_1,
+            'prioritize_tier_2': needs_tier_2,
+            'context_type': 'children_home_regulatory'
+        }
+
     def determine_response_mode(self, question: str, requested_style: str = "standard", 
                               is_file_analysis: bool = False, 
                               document_type: str = None, document_confidence: float = 0.0) -> ResponseMode:
@@ -3294,15 +3345,34 @@ class HybridRAGSystem:
         return any(indicator in question_lower for indicator in time_indicators)
 
     def safe_retrieval(self, question: str, k: int = None) -> Dict[str, Any]:
-        """Use SmartRouter for stable document retrieval with enhanced analysis"""
+        """Use SmartRouter for stable document retrieval with children's home prioritization"""
         try:
             if not self.smart_router:
                 return {"success": False, "error": "SmartRouter not available", "documents": []}
             
+            # Check if children's home prioritization is needed
+            ch_context = self.response_detector.detect_children_home_context(question)
+            
             logger.info("Using SmartRouter for document retrieval")
             
-            # Use the enhanced route_query method that includes temporal/comparison analysis
-            routing_result = self.smart_router.route_query(question, k=k)
+            if ch_context['needs_prioritization']:
+                logger.info("Children's home context detected - applying document prioritization")
+                # Get more documents initially for prioritization
+                routing_result = self.smart_router.route_query(question, k=(k*2 if k else 10))
+                
+                if routing_result["success"]:
+                    # Apply prioritization to results
+                    prioritized_docs = self._apply_children_home_prioritization(
+                        routing_result["documents"], 
+                        ch_context,
+                        target_count=k or 5
+                    )
+                    routing_result["documents"] = prioritized_docs
+                    routing_result["prioritization_applied"] = True
+                    logger.info(f"Applied children's home prioritization: {len(prioritized_docs)} docs selected")
+            else:
+                # Use standard retrieval
+                routing_result = self.smart_router.route_query(question, k=k)
             
             if routing_result["success"]:
                 logger.info(f"Retrieved {len(routing_result['documents'])} documents via SmartRouter")
@@ -3310,7 +3380,7 @@ class HybridRAGSystem:
             else:
                 logger.error(f"SmartRouter retrieval failed: {routing_result.get('error')}")
                 return routing_result
-                
+                    
         except Exception as e:
             logger.error(f"SmartRouter retrieval error: {e}")
             return {"success": False, "error": str(e), "documents": []}
@@ -3376,6 +3446,99 @@ class HybridRAGSystem:
         except Exception as e:
             logger.warning(f"DOCX text extraction failed: {e}")
             return ""
+
+    def _apply_children_home_prioritization(self, documents: List, priority_config: Dict, target_count: int):
+        """Apply tier-based prioritization with education document exclusion and deduplication"""
+        
+        tier_1_docs = []
+        tier_2_docs = []
+        tier_3_docs = []
+        excluded_docs = []
+        
+        # Track processed documents to avoid duplicates
+        seen_sources = set()
+        
+        for doc in documents:
+            doc_metadata = getattr(doc, 'metadata', {})
+            content = getattr(doc, 'page_content', '').lower()
+            title = doc_metadata.get('title', '').lower()
+            source = doc_metadata.get('source', '').lower()
+            
+            # Create unique identifier for deduplication
+            doc_id = f"{title}_{source[:50]}"
+            if doc_id in seen_sources:
+                continue  # Skip duplicates
+            seen_sources.add(doc_id)
+            
+            # EXCLUDE education documents for children's home queries
+            if any(term in title or term in source for term in [
+                'keeping children safe in education',
+                'school', 'education', 'teacher', 'headteacher'
+            ]):
+                excluded_docs.append(doc)
+                logger.info(f"Excluded education document: {title[:60]}...")
+                continue
+            
+            # Use existing authority metadata from your ingestion system
+            authority_level = doc_metadata.get('authority_level', 0.6)
+            content_classification = doc_metadata.get('content_classification', '')
+            is_primary_source = doc_metadata.get('is_primary_source', False)
+            
+            # ENHANCED Tier 1 classification - now checks for BOTH Annex A and B
+            is_tier_1 = False
+            
+            # Check by content (most reliable for regulatory documents)
+            if (('annex a' in content or 'annex b' in content) and 'children\'s home' in content):
+                is_tier_1 = True
+                logger.info(f"Tier 1 by content: Contains Annex + children's home")
+            
+            # Check by source path (your docs seem to be from Guide to Childrens Home Standards)
+            elif 'guide to childrens home' in source or 'childrens home standards' in source:
+                is_tier_1 = True
+                logger.info(f"Tier 1 by source: Children's home standards document")
+            
+            # Check by metadata
+            elif (content_classification == 'quality_standards_primary' or
+                  authority_level >= 0.9 or
+                  is_primary_source):
+                is_tier_1 = True
+                logger.info(f"Tier 1 by metadata: authority={authority_level}")
+            
+            if is_tier_1:
+                tier_1_docs.append(doc)
+            
+            # Tier 2: Working Together and other statutory guidance
+            elif ('working together' in title or 'safeguard' in title or
+                  'national minimum standards' in title):
+                tier_2_docs.append(doc)
+            
+            else:
+                tier_3_docs.append(doc)
+        
+        # Log final counts only
+        logger.info(f"Final classification: Tier1={len(tier_1_docs)}, Tier2={len(tier_2_docs)}, Tier3={len(tier_3_docs)}, Excluded={len(excluded_docs)}")
+        
+        # Build prioritized result
+        result_docs = []
+        
+        # Prioritize Tier 1 documents
+        if tier_1_docs:
+            result_docs.extend(tier_1_docs[:3])
+            logger.info(f"Prioritized {len(tier_1_docs[:3])} Tier 1 regulatory documents")
+        
+        # Add Tier 2 if space remaining
+        remaining = target_count - len(result_docs)
+        if remaining > 0 and tier_2_docs:
+            tier_2_add = tier_2_docs[:remaining//2] if remaining > 2 else tier_2_docs[:1]
+            result_docs.extend(tier_2_add)
+            logger.info(f"Added {len(tier_2_add)} Tier 2 documents")
+        
+        # Fill remaining with Tier 3
+        remaining = target_count - len(result_docs)
+        if remaining > 0 and tier_3_docs:
+            result_docs.extend(tier_3_docs[:remaining])
+        
+        return result_docs[:target_count]
 
     def _classify_document_type(self, content: str, filename: str) -> Dict[str, Any]:
         """Enhanced document classification with better pattern matching"""

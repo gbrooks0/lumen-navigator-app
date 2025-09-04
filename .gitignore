@@ -21,6 +21,6 @@ document_cache/
 *.db
 *.log
 faiss_index/
-indexes/
-*.faiss
-*.pkl
+#indexes/
+#*.faiss
+#*.pkl
